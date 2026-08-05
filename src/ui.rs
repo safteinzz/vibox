@@ -285,13 +285,21 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Cells before the first column: the sign, a space, the line number, a space.
+///
+/// The number grows with the library, so a four digit row on a library over a
+/// thousand tracks widens the gutter instead of shoving the name sideways.
+fn gutter(app: &App) -> usize {
+    let digits = app.view.len().to_string().len().max(3);
+    3 + digits
+}
+
 /// Name and width of each visible column, so the header and the rows agree.
 ///
-/// The row is `sign, space, 3 digit gutter, space` (6), then every visible
-/// column followed by a space, then the duration.
+/// Every visible column is followed by a space, and the duration closes the row.
 fn columns(app: &App, width: usize, dur_w: usize) -> Vec<(&'static str, usize)> {
     let shown = app.columns.shown();
-    let rest = width.saturating_sub(6 + shown.len() + dur_w);
+    let rest = width.saturating_sub(gutter(app) + shown.len() + dur_w);
     let total: usize = shown.iter().map(|(_, weight)| weight).sum();
     if total == 0 {
         return Vec::new();
@@ -334,7 +342,9 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let dur_w = duration_width(app);
     let cols = columns(app, area.width as usize, dur_w);
-    let mut header = String::from("      ");
+    let pad = gutter(app);
+    let num_w = pad - 3;
+    let mut header = " ".repeat(pad);
     for (name, w) in &cols {
         header.push_str(&truncate(name, *w));
         header.push(' ');
@@ -384,9 +394,9 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         };
         // Relative numbers, so 8j lands where you counted it would.
         let number = if is_cursor {
-            format!("{:<3}", row + 1)
+            format!("{:<num_w$}", row + 1)
         } else {
-            format!("{:>3}", app.cur.abs_diff(row))
+            format!("{:>num_w$}", app.cur.abs_diff(row))
         };
 
         let editing_row =
@@ -423,8 +433,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         body.push_str(&format!("{:>dur_w$}", fmt_duration(track.duration)));
 
         if editing_row {
-            // The cursor sits in the name itself, six cells in: sign, space,
-            // three digit gutter, space.
+            // The cursor sits in the name itself, just past the gutter.
             let col = app.edit.as_ref().map_or(0, |edit| edit.col);
             if app.mode == Mode::EditInsert {
                 // Insert uses the terminal's own cursor, so the shape can be a
@@ -435,11 +444,13 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                     .chars()
                     .take(col)
                     .collect();
-                let x = area.x + 6 + u16::try_from(text.width()).unwrap_or(0);
+                let x = area.x
+                    + u16::try_from(pad).unwrap_or(6)
+                    + u16::try_from(text.width()).unwrap_or(0);
                 cursor_at = Some((x.min(area.right().saturating_sub(1)), area.y + rows));
                 lines.push(Line::styled(truncate(&body, w), base));
             } else {
-                lines.push(row_with_cursor(&truncate(&body, w), 6 + col, base, app.mode));
+                lines.push(row_with_cursor(&truncate(&body, w), pad + col, base, app.mode));
             }
         } else {
             lines.push(Line::styled(truncate(&body, w), base));
