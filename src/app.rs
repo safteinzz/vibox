@@ -285,6 +285,7 @@ pub struct App {
     pub msg: Option<(String, bool)>,
     /// Where the real terminal cursor goes while inserting, set by the renderer.
     pub cursor_screen: Option<(u16, u16)>,
+    pub show_info: bool,
     pub show_changes: bool,
     pub show_help: bool,
     pub help_scroll: usize,
@@ -359,6 +360,7 @@ impl App {
             mpris: mpris::start().ok(),
             msg: None,
             cursor_screen: None,
+            show_info: false,
             show_changes: false,
             show_help: false,
             help_scroll: 0,
@@ -1162,8 +1164,12 @@ impl App {
 
     /// `y`: remembers the selected tracks so `p` can put them in a playlist.
     pub fn yank_selection(&mut self) {
+        if self.view.is_empty() {
+            self.error("nothing here to yank");
+            return;
+        }
         let (a, b) = self.selection_range();
-        let b = b.min(self.view.len().saturating_sub(1));
+        let b = b.min(self.view.len() - 1);
         self.yank = self.view[a..=b]
             .iter()
             .map(|&i| self.tracks[i].path.clone())
@@ -1217,7 +1223,15 @@ impl App {
         self.checkpoint();
         let (a, b) = self.selection_range();
         let b = b.min(self.playlist_rows.len() - 1);
-        self.playlist_rows.drain(a..=b);
+
+        // `dd` is a cut, as in vim: what comes out goes in the register, so a
+        // `p` further down the playlist puts it back there.
+        let taken: Vec<usize> = self.playlist_rows.drain(a..=b).collect();
+        self.yank = taken
+            .iter()
+            .filter_map(|&i| self.tracks.get(i).map(|t| t.path.clone()))
+            .collect();
+
         self.playlist_dirty = true;
         self.exit_visual();
         self.cur = a;
@@ -1225,37 +1239,9 @@ impl App {
         let n = b - a + 1;
         let name = self.playlist_view.clone().unwrap_or_default();
         self.info(format!(
-            "took {n} track{} out of `{name}`, still on disk, `:w` saves",
+            "cut {n} track{} from `{name}`, `p` puts them back, `:w` saves",
             plural(n)
         ));
-    }
-
-    /// `J` and `K`: reorder rows inside the open playlist.
-    pub fn move_in_playlist(&mut self, delta: isize) {
-        if self.playlist_view.is_none() {
-            self.error("`J` and `K` reorder a playlist; a folder has `:sort` instead");
-            return;
-        }
-        let (a, b) = self.selection_range();
-        let len = self.playlist_rows.len();
-        if len == 0 || b >= len {
-            return;
-        }
-        let to = a as isize + delta;
-        if to < 0 || b as isize + delta >= len as isize {
-            return;
-        }
-
-        let to = to as usize;
-        let moved: Vec<usize> = self.playlist_rows.drain(a..=b).collect();
-        let count = moved.len();
-        self.playlist_rows.splice(to..to, moved);
-        self.playlist_dirty = true;
-        self.cur = to;
-        if self.mode == Mode::Visual {
-            self.visual_anchor = Some(to + count - 1);
-        }
-        self.rebuild_view();
     }
 
     /// Creates an empty playlist, ready for `p` to fill.
@@ -2262,6 +2248,44 @@ impl App {
         (self.rng % self.queue.len() as u64) as usize
     }
 
+    /// Copies text to the system clipboard with OSC 52, the escape sequence
+    /// terminals answer for it.
+    ///
+    /// No clipboard crate: those pull in x11 or wayland C libraries, and the
+    /// terminal already knows how to do this. tmux needs `set-clipboard on`.
+    pub fn copy_to_clipboard(&mut self, text: &str) {
+        use std::io::Write;
+
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = text.as_bytes();
+        let mut encoded = String::new();
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                chunk.get(1).copied().unwrap_or(0),
+                chunk.get(2).copied().unwrap_or(0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    encoded.push(ALPHABET[(n >> (18 - i * 6)) as usize & 0x3F] as char);
+                } else {
+                    encoded.push('=');
+                }
+            }
+        }
+
+        let mut out = std::io::stdout();
+        if write!(out, "\x1b]52;c;{encoded}\x07")
+            .and_then(|()| out.flush())
+            .is_ok()
+        {
+            self.info(format!("copied {text}"));
+        } else {
+            self.error("cannot reach the terminal clipboard");
+        }
+    }
+
     // ---- messages ---------------------------------------------------------
 
     pub fn info(&mut self, text: impl Into<String>) {
@@ -2562,6 +2586,55 @@ mod tests {
         assert_eq!(app.playlist_view.as_deref(), Some("roadtrip"));
         assert!(app.playlists.iter().any(|(name, _)| name == "roadtrip"));
         assert!(!app.playlists.iter().any(|(name, _)| name == "mix"));
+    }
+
+    #[test]
+    fn dd_in_a_playlist_cuts_so_p_can_put_it_back() {
+        let (mut app, _dir) = library(&["a.mp3", "b.mp3", "c.mp3"]);
+        // yank the three tracks from the library, then fill a playlist
+        app.mode = Mode::Visual;
+        app.visual_anchor = Some(0);
+        app.cur = 2;
+        app.yank_selection();
+
+        app.create_playlist("mix");
+        app.open_playlist();
+        app.paste_into_playlist();
+        let order: Vec<String> = app.view.iter().map(|&i| app.tracks[i].file.clone()).collect();
+        assert_eq!(order, ["a", "b", "c"]);
+
+        app.cur = 0;
+        app.remove_from_playlist();
+        assert_eq!(app.yank.len(), 1, "a cut fills the register");
+
+        app.cur = 1;
+        app.paste_into_playlist();
+        let order: Vec<String> = app.view.iter().map(|&i| app.tracks[i].file.clone()).collect();
+        assert_eq!(order, ["b", "c", "a"], "dd then p is how a track moves");
+    }
+
+    #[test]
+    fn deleting_a_playlist_leaves_every_track_alone() {
+        let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
+        app.mode = Mode::Visual;
+        app.visual_anchor = Some(0);
+        app.cur = 1;
+        app.yank_selection();
+
+        app.create_playlist("mix");
+        app.open_playlist();
+        app.paste_into_playlist();
+        app.write_all();
+
+        app.tab = Tab::Playlists;
+        app.pl_cur = 0;
+        app.delete_playlist();
+        app.write_all();
+
+        assert!(app.playlists.is_empty(), "the m3u is gone");
+        assert!(dir.path().join("a.mp3").exists(), "its tracks are not");
+        assert!(dir.path().join("b.mp3").exists());
+        assert_eq!(app.tracks.len(), 2);
     }
 
     #[test]

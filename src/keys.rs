@@ -295,6 +295,24 @@ fn leave_line(app: &mut App) {
 
 #[allow(clippy::too_many_lines)] // it is a keymap: one arm per key reads better flat
 fn normal_mode(app: &mut App, key: KeyEvent) {
+    // The info window takes the keyboard while it is up.
+    if app.show_info {
+        match key.code {
+            KeyCode::Char('y') => {
+                let path = app.current_track().map(|t| t.path.display().to_string());
+                if let Some(path) = path {
+                    app.copy_to_clipboard(&path);
+                }
+                app.show_info = false;
+            }
+            KeyCode::Char('q' | 'Q' | 'K') | KeyCode::Esc | KeyCode::Enter => {
+                app.show_info = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if app.show_changes {
         if matches!(
             key.code,
@@ -359,6 +377,15 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('c') if ctrl => app.info("type  :q  to quit vibox"),
         KeyCode::F(1) => app.show_help = !app.show_help,
+        // vim's `K`: tell me about the thing under the cursor.
+        KeyCode::Char('K') if app.focus == Pane::Tracks => {
+            if app.current_track().is_some() {
+                app.show_info = true;
+            } else {
+                app.error("no track here");
+            }
+        }
+
         KeyCode::Char('q') if app.show_help => app.show_help = false,
 
         // ---- panes -------------------------------------------------------
@@ -501,8 +528,6 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('u') => app.undo(),
-        KeyCode::Char('J') => app.move_in_playlist(count as isize),
-        KeyCode::Char('K') => app.move_in_playlist(-(count as isize)),
 
         // ---- editing -----------------------------------------------------
         KeyCode::Char('c') if app.focus == Pane::Tracks => app.begin_edit(),

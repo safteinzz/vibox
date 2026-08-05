@@ -81,7 +81,7 @@ pub fn run(app: &mut App, line: &str) {
             Err(e) => app.error(format!("{e}")),
         },
         // One `:w` writes everything outstanding: the pending renames and the
-        // playlist you reordered. With a name it saves the view as a new one.
+        // playlist you changed. With a name it saves the view as a new one.
         "w" | "write" | "save" => {
             if !cmd.args.is_empty() {
                 app.save_playlist(cmd.args);

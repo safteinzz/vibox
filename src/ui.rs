@@ -77,12 +77,68 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_lyrics && lyrics_w == 0 {
         draw_lyrics_popup(frame, app, frame.area());
     }
+    if app.show_info {
+        draw_info(frame, app, frame.area());
+    }
     if app.show_changes {
         draw_changes(frame, app, frame.area());
     }
     if app.show_help {
         draw_help(frame, app, frame.area());
     }
+}
+
+/// `K`: everything vibox knows about the track under the cursor.
+fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(track) = app.current_track() else {
+        return;
+    };
+
+    let year = track.year.map(|y| y.to_string()).unwrap_or_default();
+    let number = match (track.disc_no, track.track_no) {
+        (Some(disc), Some(no)) => format!("{disc}.{no}"),
+        (_, Some(no)) => no.to_string(),
+        _ => String::new(),
+    };
+    let fields = [
+        ("path", track.path.display().to_string()),
+        ("file", track.file.clone()),
+        ("title", track.title.clone()),
+        ("artist", track.artist.clone()),
+        ("album", track.album.clone()),
+        ("album artist", track.album_artist.clone()),
+        ("track", number),
+        ("year", year),
+        ("genre", track.genre.clone()),
+        ("length", fmt_duration(track.duration)),
+    ];
+
+    let body: Vec<Line> = fields
+        .iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(label, value)| {
+            Line::from(vec![
+                Span::styled(format!(" {label:<13}"), dim()),
+                Span::raw(value.clone()),
+            ])
+        })
+        .collect();
+
+    let widest = body.iter().map(Line::width).max().unwrap_or(20) + 2;
+    let w = (widest as u16).min(area.width.saturating_sub(4));
+    let h = (body.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: (area.width.saturating_sub(w)) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
+    let block = Block::bordered().title(" y copies the path, q closes ");
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(body), inner);
 }
 
 /// `:changes`: exactly what a `:w` would write, before you press it.
@@ -913,6 +969,7 @@ const HELP: &[HelpSection] = &[
             ("zz zt zb", "window around the cursor"),
             ("ctrl-e ctrl-y", "scroll the window, leave the cursor"),
             ("gp", "jump to whatever is playing"),
+            ("K", "what vibox knows about this track; y copies its path"),
             ("/ ?, n N", "search files, artists and albums, then repeat it"),
         ],
     ),
@@ -939,7 +996,7 @@ const HELP: &[HelpSection] = &[
             ("V, y", "select a run of tracks, yank the selection"),
             ("p", "put the yank in a playlist, or the cut in a folder"),
             ("dd x", "cut: a playlist entry, a playlist, or a file"),
-            ("J K", "move the selection down, up, inside a playlist"),
+            ("dd then p", "move a track: cut it, put it where it should go"),
             ("o", "new playlist or folder, by name"),
             ("u, ctrl-r", "undo, redo anything still waiting"),
             (":ch", "list exactly what `:w` would do"),

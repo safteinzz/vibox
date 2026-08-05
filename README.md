@@ -82,8 +82,8 @@ switches to them with `gt`. `o` starts an empty one, `enter` shows one in the
 track list, `t` opens it in a tab of its own.
 
 Filling one is a yank and a put: `t` a folder into its own tab, `V` and `j` to
-select, `y`, `gt` back to the playlist, `p`. Then `J` and `K` reorder, `dd`
-takes a track out, and `:w` saves. A playlist is a view over your library, so
+select, `y`, `gt` back to the playlist, `p`. `dd` cuts a track out and `p` puts
+it back where you want it, so that is also how you reorder one. `:w` saves. A playlist is a view over your library, so
 the folders tab keeps browsing everything while one is open.
 
 Nothing is written until `:w`. A `[+]` on the statusline means something is
