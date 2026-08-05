@@ -1,0 +1,46 @@
+[package]
+name = "vibox"
+version = "0.1.0"
+edition = "2024"
+# let chains and the 2024 edition; an older toolchain fails with parse errors
+# instead of a clear message without this.
+rust-version = "1.88"
+description = "a jukebox you exit with :q - a cli music player with vi motions, ex commands, and tmux manners"
+license = "AGPL-3.0-only"
+repository = "https://gitlab.com/safteinzz/vibox"
+readme = "README.md"
+keywords = ["music", "player", "tui", "vim", "modal"]
+categories = ["command-line-utilities", "multimedia::audio"]
+# working files that are not part of the crate
+exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/"]
+
+[dependencies]
+anyhow = "1"                                    # error plumbing, context on every failure the user can act on
+clap = { version = "4", features = ["derive"] } # argv parsing and help text
+dirs = "6"                                      # xdg music dir, config dir
+lofty = "0.24"                                  # pure-rust tag reader: id3, vorbis, mp4, ape
+ratatui = "0.30"                                # the tui, re-exports crossterm so events come from one version
+rayon = "1"                                     # tag parsing is per-file and cpu bound
+# decoding only. rodio's own output would drag in cpal, which needs the alsa C
+# headers at build time, and `cargo install` failing on a missing header is not
+# a thing we ship. src/player.rs does the output instead.
+rodio = { version = "0.22", default-features = false, features = [
+    "flac",
+    "mp3",
+    "mp4",
+    "vorbis",
+    "wav",
+] }
+# pure rust pulseaudio protocol client. pipewire serves this socket too.
+pulseaudio = "0.3"
+walkdir = "2"                                   # recursive library scan
+# lyrics over https. rustls with the ring provider, so no cmake and no headers.
+ureq = "3"
+serde_json = "1"                                # lrclib replies, nothing else
+# mpris on d-bus: media keys and playerctl. pure rust, async kept in one thread.
+zbus = "5"
+unicode-width = "0.2"                           # cjk glyphs take two cells; columns must line up
+
+[profile.release]
+lto = true
+strip = true
