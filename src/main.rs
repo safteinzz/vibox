@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{self, Event};
@@ -41,6 +41,9 @@ const FRAME: Duration = Duration::from_millis(50);
                   filenames in it, and `:help` lists every key."
 )]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+
     /// Library root to scan. Defaults to your music directory.
     path: Option<PathBuf>,
 
@@ -49,8 +52,23 @@ struct Cli {
     sort: String,
 }
 
+#[derive(Subcommand)]
+enum Cmd {
+    /// Update vibox to the latest release
+    ///   -y          skip the confirmation prompt
+    #[command(verbatim_doc_comment)]
+    Update {
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Cmd::Update { yes }) = cli.cmd {
+        return cmd_update(yes);
+    }
 
     let Some(sort) = SortKey::parse(&cli.sort) else {
         bail!(
@@ -109,3 +127,35 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> Result<()> {
     Ok(())
 }
 
+
+/// `vibox update`: reinstall the latest release with
+/// `cargo install vibox --force`. Prompts first unless `-y`.
+fn cmd_update(yes: bool) -> Result<()> {
+    use std::io::Write;
+
+    if !yes {
+        print!("Update vibox to the latest release via cargo? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).ok();
+        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    println!("updating via cargo install vibox --force\n");
+    match std::process::Command::new("cargo")
+        .args(["install", "vibox", "--force"])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            println!("\nvibox is up to date");
+            Ok(())
+        }
+        Ok(status) => bail!("update failed (cargo exited {})", status.code().unwrap_or(1)),
+        Err(e) => {
+            bail!("could not run cargo: {e} - is it installed and on PATH? (https://rustup.rs)")
+        }
+    }
+}
