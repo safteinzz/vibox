@@ -1,23 +1,29 @@
 # vibox
 
-**A jukebox you exit with `:q`.**
+**A jukebox you exit with `:q`**
 
 A cli music player with vi motions, ex commands, and tmux manners. Your library
 is a directory, a track is a file, and the last line of the screen is the
 command line.
 
 ```
-* everything (61)            │      file                     artist          album              time
-.                            │  1   Awolnation - Sail (Unli… AWOLNATION      RE/Sail            5:48
-                             │    1 Band Of Horses - The Fu… Band of Horses  Acoustic at the …  5:05
-                             │    2 Black Ops 2 Plaza Night… Skrillex feat.… [standalone reco…  3:51
-                             │>   3 Boncabe                  Knife Party     Rage Valley        2:30
-                             │    4 Cadillac by Panda Eyes…  Panda Eyes & A… Dubstep.NET Free…  3:51
-                             │    5 Condukta - Open Circuit                  Dubstep            3:29
-   0:47 ━━━━━━━━━━━━━━━━━────────────────────────────────────────────────────────────────  2:30
- NORMAL  Knife Party - Bonfire                                  vol 80%  path rep:-      4/61
- /bonf
+* everything (15)            │      file                       artist           album              time
+pop                          │    4 Daft Punk - Around the Wo… Daft Punk        Homework           7:09
+rock                         │    3 Fleetwood Mac - Dreams     Fleetwood Mac    Rumours            4:17
+                             │    2 Massive Attack - Teardrop  Massive Attack   Mezzanine          5:29
+                             │    1 Nirvana - Smells Like Tee… Nirvana          Nevermind          5:01
+                             │  5   Pink Floyd - Comfortably … Pink Floyd       The Wall           6:23
+                             │    1 Portishead - Glory Box     Portishead       Dummy              5:06
+                             │>   2 Rick Astley - Never Gonna… Rick Astley      Whenever You Nee…  3:34
+                             │    3 The Prodigy - Breathe      The Prodigy      The Fat of the L…  5:35
+   1:58 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────────────────────────────────────   3:34
+ NORMAL  Rick Astley - Never Gonna Give You Up                          vol 80%  artist rep:- shf  5/15
+sorted by artist
 ```
+
+Folders on the left, tracks on the right, the played track marked with `>`, and
+relative line numbers in the gutter so `4j` lands where you counted. The last
+two lines are the statusline and the message line, exactly where vi puts them.
 
 ```bash
 cargo install vibox   # that is the whole install: no system libraries, no headers
