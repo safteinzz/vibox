@@ -9,6 +9,7 @@ mod keys;
 mod library;
 mod lyrics;
 mod matrix;
+mod name;
 mod mpris;
 mod player;
 mod ui;
@@ -77,9 +78,13 @@ fn main() -> Result<()> {
         );
     };
 
+    // A path on the command line is for this session only; with none, the
+    // library is whatever `:set root=` put in the rc file.
     let root = match cli.path {
         Some(p) => p,
-        None => dirs::audio_dir().unwrap_or(std::env::current_dir()?),
+        None => excmd::configured_music()
+            .or_else(dirs::audio_dir)
+            .unwrap_or(std::env::current_dir()?),
     };
 
     // ratatui would panic with a raw os error if there is no terminal to take over.

@@ -134,6 +134,7 @@ pub fn scan(root: &Path) -> Result<Vec<Track>> {
         WalkDir::new(root)
             .follow_links(false)
             .into_iter()
+            .filter_entry(|e| e.depth() == 0 || !hidden(e))
             .filter_map(std::result::Result::ok)
             .filter(|e| e.file_type().is_file())
             .map(walkdir::DirEntry::into_path)
@@ -147,6 +148,18 @@ pub fn scan(root: &Path) -> Result<Vec<Track>> {
         sort(&mut tracks, SortKey::Path);
     }
     Ok(tracks)
+}
+
+/// Hidden entries are skipped: a library has no business showing `.git`,
+/// `.stfolder` or a trash directory.
+///
+/// The root itself is exempt at the call site, since a library that lives in a
+/// dotted directory would otherwise scan to nothing.
+fn hidden(entry: &walkdir::DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_str()
+        .is_some_and(|name| name.starts_with('.') && name != ".")
 }
 
 pub fn is_playlist(path: &Path) -> bool {
@@ -224,7 +237,19 @@ pub fn sort(tracks: &mut [Track], key: SortKey) {
 
 /// The directories that actually contain tracks, as shown in the left pane.
 pub fn folders(tracks: &[Track], root: &Path) -> Vec<(String, PathBuf)> {
-    let dirs: BTreeSet<PathBuf> = tracks.iter().map(|t| t.dir().to_path_buf()).collect();
+    let mut dirs: BTreeSet<PathBuf> = tracks.iter().map(|t| t.dir().to_path_buf()).collect();
+    // Directories with no tracks in them count: a folder you just made has to
+    // show up, or there is nowhere to move anything into.
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.depth() == 0 || !hidden(e))
+        .filter_map(std::result::Result::ok)
+    {
+        if entry.file_type().is_dir() && entry.path() != root {
+            dirs.insert(entry.into_path());
+        }
+    }
     dirs.into_iter()
         .map(|d| {
             // Outside the root (an m3u can name anything), the full path is
@@ -253,6 +278,36 @@ pub fn fmt_duration(d: Duration) -> String {
     }
 }
 
+/// Writes an extended m3u. Paths stay absolute so the file still resolves when
+/// it is opened from somewhere else.
+pub fn write_m3u(path: &Path, tracks: &[&Track]) -> Result<()> {
+    use std::io::Write;
+
+    let mut out = String::from("#EXTM3U\n");
+    for t in tracks {
+        let who = if t.artist.is_empty() {
+            String::new()
+        } else {
+            format!("{} - ", t.artist)
+        };
+        out.push_str(&format!(
+            "#EXTINF:{},{}{}\n{}\n",
+            t.duration.as_secs(),
+            who,
+            t.title,
+            t.path.display()
+        ));
+    }
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("cannot create `{}`", dir.display()))?;
+    }
+    std::fs::File::create(path)
+        .and_then(|mut f| f.write_all(out.as_bytes()))
+        .with_context(|| format!("cannot write playlist `{}`", path.display()))
+}
+
 /// Reads the file paths out of an m3u, ignoring directives and comments.
 pub fn read_m3u(path: &Path) -> Result<Vec<PathBuf>> {
     let text = std::fs::read_to_string(path)
@@ -265,3 +320,113 @@ pub fn read_m3u(path: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(file: &str, artist: &str, secs: u64, path: &str) -> Track {
+        Track {
+            path: PathBuf::from(path),
+            file: file.into(),
+            title: file.into(),
+            artist: artist.into(),
+            album: "Album".into(),
+            album_artist: artist.into(),
+            track_no: None,
+            disc_no: None,
+            year: None,
+            genre: String::new(),
+            duration: Duration::from_secs(secs),
+        }
+    }
+
+    #[test]
+    fn durations_grow_an_hour_field_only_when_they_need_one() {
+        assert_eq!(fmt_duration(Duration::from_secs(3)), "0:03");
+        assert_eq!(fmt_duration(Duration::from_secs(243)), "4:03");
+        assert_eq!(fmt_duration(Duration::from_secs(3723)), "1:02:03");
+    }
+
+    #[test]
+    fn only_known_audio_extensions_are_scanned() {
+        assert!(is_audio(Path::new("/m/a.FLAC")));
+        assert!(is_audio(Path::new("/m/a.mp3")));
+        assert!(!is_audio(Path::new("/m/cover.jpg")));
+        assert!(!is_audio(Path::new("/m/notes")));
+        assert!(is_playlist(Path::new("/m/set.m3u")));
+        assert!(!is_playlist(Path::new("/m/set.mp3")));
+    }
+
+    #[test]
+    fn a_search_never_matches_the_directory_a_track_sits_in() {
+        let hay = track("Bonfire", "Knife Party", 150, "/m/TESTING/Bonfire.mp3").haystack();
+        assert!(hay.contains("Bonfire"));
+        assert!(!hay.to_lowercase().contains("testing"));
+    }
+
+    #[test]
+    fn a_written_playlist_reads_back_to_the_same_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let m3u = dir.path().join("set.m3u");
+        let tracks = [
+            track("a", "x", 61, "/m/a.mp3"),
+            track("b", "y", 2, "/m/b.mp3"),
+        ];
+        let refs: Vec<&Track> = tracks.iter().collect();
+        write_m3u(&m3u, &refs).unwrap();
+        assert_eq!(
+            read_m3u(&m3u).unwrap(),
+            vec![PathBuf::from("/m/a.mp3"), PathBuf::from("/m/b.mp3")]
+        );
+    }
+
+    #[test]
+    fn an_empty_playlist_is_written_and_reads_back_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let m3u = dir.path().join("empty.m3u");
+        write_m3u(&m3u, &[]).unwrap();
+        assert!(read_m3u(&m3u).unwrap().is_empty());
+    }
+
+    #[test]
+    fn folder_labels_are_relative_to_the_library_root() {
+        let tracks = vec![
+            track("a", "x", 1, "/m/Bjork/Post/01.flac"),
+            track("b", "x", 1, "/m/Bjork/Post/02.flac"),
+            track("c", "y", 1, "/m/Air/Moon/01.flac"),
+        ];
+        let labels: Vec<String> = folders(&tracks, Path::new("/m"))
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert_eq!(labels, vec!["Air/Moon", "Bjork/Post"]);
+    }
+
+    #[test]
+    fn sorting_by_title_ignores_case() {
+        let mut tracks = vec![
+            track("zeta", "a", 1, "/m/1.mp3"),
+            track("Alpha", "b", 2, "/m/2.mp3"),
+        ];
+        sort(&mut tracks, SortKey::Title);
+        assert_eq!(tracks[0].title, "Alpha");
+    }
+
+    #[test]
+    fn a_scan_of_a_missing_root_names_the_path() {
+        let err = scan(Path::new("/nope/nowhere")).unwrap_err().to_string();
+        assert!(err.contains("/nope/nowhere"), "{err}");
+    }
+
+    #[test]
+    fn hidden_directories_are_not_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".hidden")).unwrap();
+        std::fs::write(dir.path().join(".hidden/x.mp3"), b"").unwrap();
+        std::fs::write(dir.path().join("y.mp3"), b"").unwrap();
+        let found = scan(dir.path()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file, "y");
+    }
+}

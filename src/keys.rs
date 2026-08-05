@@ -3,7 +3,7 @@
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::app::{App, Mode, Pane};
+use crate::app::{App, Mode, Pane, Tab};
 use crate::excmd;
 
 pub fn handle(app: &mut App, key: KeyEvent) {
@@ -16,7 +16,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
     match app.mode {
         Mode::Command | Mode::Search => line_mode(app, key),
         Mode::Edit | Mode::EditInsert => edit_mode(app, key),
-        Mode::Normal => normal_mode(app, key),
+        Mode::Normal | Mode::Visual => normal_mode(app, key),
     }
 }
 
@@ -94,6 +94,10 @@ fn line_mode(app: &mut App, key: KeyEvent) {
 
 /// The list as a buffer of filenames: vi motions and operators on the name
 /// under the cursor, `j` and `k` to move between rows, `:w` to write.
+///
+/// Whichever pane `c` opened hands over its own `NameBuffer`, and everything
+/// below works on that. There is one implementation of the editing, not one
+/// per pane.
 fn edit_mode(app: &mut App, key: KeyEvent) {
     if app.mode == Mode::EditInsert {
         edit_insert(app, key);
@@ -101,9 +105,6 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
     }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let mut text = edit_chars(app);
-    let last = text.len().saturating_sub(1);
-    let col = edit_col(app).min(last);
 
     // `c` and `d` wait for their motion.
     if let Some(op) = app.pending.take() {
@@ -111,182 +112,128 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Keys that are about the pane rather than the name it is editing.
     match key.code {
+        // Leaving a name is not a write: it joins the pending set, like
+        // marking a file does, and `:w` writes the lot.
         KeyCode::Esc => {
-            if app.edit_dirty() {
-                app.error("no write since last change: `:w` renames, `:e!` throws it away");
-            } else {
-                app.end_edit();
-            }
+            app.commit_name();
+            app.mode = Mode::Normal;
+            return;
         }
         KeyCode::Char(':') => {
             app.mode = Mode::Command;
             app.line_prefix = ':';
             app.line.clear();
             app.line_cur = 0;
+            return;
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.move_cursor(1);
-            set_edit_col(app, col);
+        KeyCode::Char('u') => {
+            app.undo();
+            return;
         }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.move_cursor(-1);
-            set_edit_col(app, col);
+        KeyCode::Char('r') if ctrl => {
+            app.redo();
+            return;
         }
-        KeyCode::Char('h') | KeyCode::Left => set_edit_col(app, col.saturating_sub(1)),
-        KeyCode::Char('l') | KeyCode::Right => set_edit_col(app, (col + 1).min(last)),
-        KeyCode::Char('0') => set_edit_col(app, 0),
-        KeyCode::Char('$') => set_edit_col(app, last),
-        KeyCode::Char('w') if !ctrl => {
-            set_edit_col(app, word_forward(&text, col).min(last));
+        KeyCode::Char('j') | KeyCode::Down if app.renaming_a_track() => {
+            app.edit_next_row(1);
+            return;
         }
-        KeyCode::Char('b') => set_edit_col(app, word_start(&text, col)),
-        KeyCode::Char('e') => set_edit_col(app, word_end(&text, col)),
-        KeyCode::Char('i') => app.mode = Mode::EditInsert,
-        KeyCode::Char('a') => {
-            set_edit_col(app, (col + 1).min(text.len()));
-            app.mode = Mode::EditInsert;
-        }
-        KeyCode::Char('I') => {
-            set_edit_col(app, 0);
-            app.mode = Mode::EditInsert;
-        }
-        KeyCode::Char('A') => {
-            set_edit_col(app, text.len());
-            app.mode = Mode::EditInsert;
-        }
-        KeyCode::Char('x') | KeyCode::Delete => {
-            if col < text.len() {
-                text.remove(col);
-                set_edit_col(app, col.min(text.len().saturating_sub(1)));
-                app.set_edit_text(text.iter().collect());
-            }
-        }
-        KeyCode::Char('D') => {
-            text.truncate(col);
-            app.set_edit_text(text.iter().collect());
-        }
-        KeyCode::Char('C') => {
-            text.truncate(col);
-            app.set_edit_text(text.iter().collect());
-            app.mode = Mode::EditInsert;
-        }
-        KeyCode::Char('S') => {
-            app.set_edit_text(String::new());
-            set_edit_col(app, 0);
-            app.mode = Mode::EditInsert;
+        KeyCode::Char('k') | KeyCode::Up if app.renaming_a_track() => {
+            app.edit_next_row(-1);
+            return;
         }
         KeyCode::Char('c' | 'd') => {
             app.pending = Some(if key.code == KeyCode::Char('c') { 'c' } else { 'd' });
+            return;
         }
         _ => {}
+    }
+
+    // Anything that changes the text is undoable on its own.
+    if matches!(
+        key.code,
+        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'x' | 'D' | 'C' | 'S') | KeyCode::Delete
+    ) {
+        app.checkpoint();
+    }
+
+    let insert = matches!(key.code, KeyCode::Char('i' | 'a' | 'I' | 'A' | 'C' | 'S'));
+    let Some(buf) = app.name_buffer() else { return };
+
+    match key.code {
+        KeyCode::Char('h') | KeyCode::Left => buf.left(),
+        KeyCode::Char('l') | KeyCode::Right => buf.right(),
+        KeyCode::Char('0') => buf.jump_start(),
+        KeyCode::Char('$') => buf.jump_end(),
+        KeyCode::Char('w') if !ctrl => buf.jump_word_forward(),
+        KeyCode::Char('b') => buf.jump_word_back(),
+        KeyCode::Char('e') => buf.jump_word_end(),
+        KeyCode::Char('i') => {}
+        KeyCode::Char('a') => buf.append_here(),
+        KeyCode::Char('I') => buf.jump_start(),
+        KeyCode::Char('A') => buf.append_at_end(),
+        KeyCode::Char('x') | KeyCode::Delete => buf.delete_here(),
+        KeyCode::Char('D' | 'C') => buf.truncate_here(),
+        KeyCode::Char('S') => buf.clear(),
+        _ => return,
+    }
+
+    if insert {
+        app.mode = Mode::EditInsert;
     }
 }
 
 /// Second key of `cw`, `cc`, `dw`, `dd`.
 fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
-    let mut text = edit_chars(app);
-    let col = edit_col(app).min(text.len());
+    app.checkpoint();
+    let Some(buf) = app.name_buffer() else { return };
 
     match (op, key.code) {
-        ('c', KeyCode::Char('c')) | ('d', KeyCode::Char('d')) => {
-            app.set_edit_text(String::new());
-            set_edit_col(app, 0);
-            if op == 'c' {
-                app.mode = Mode::EditInsert;
-            }
-        }
-        (_, KeyCode::Char('w' | 'e')) => {
-            let to = if key.code == KeyCode::Char('e') {
-                word_end(&text, col) + 1
-            } else {
-                word_forward(&text, col).max(col)
-            };
-            let to = to.min(text.len());
-            text.drain(col..to);
-            app.set_edit_text(text.iter().collect());
-            if op == 'c' {
-                app.mode = Mode::EditInsert;
-            }
-        }
-        (_, KeyCode::Char('b')) => {
-            let from = word_start(&text, col);
-            text.drain(from..col);
-            set_edit_col(app, from);
-            app.set_edit_text(text.iter().collect());
-            if op == 'c' {
-                app.mode = Mode::EditInsert;
-            }
-        }
-        (_, KeyCode::Char('$')) => {
-            text.truncate(col);
-            app.set_edit_text(text.iter().collect());
-            if op == 'c' {
-                app.mode = Mode::EditInsert;
-            }
-        }
-        _ => {}
+        ('c', KeyCode::Char('c')) | ('d', KeyCode::Char('d')) => buf.clear(),
+        // vim's own quirk: `cw` changes to the end of the word, the way `ce`
+        // does, instead of eating the space after it like `dw`.
+        (_, KeyCode::Char('w' | 'e')) => buf.delete_word(op == 'c' || key.code == KeyCode::Char('e')),
+        (_, KeyCode::Char('b')) => buf.delete_word_back(),
+        (_, KeyCode::Char('$')) => buf.truncate_here(),
+        _ => return,
+    }
+
+    if op == 'c' {
+        app.mode = Mode::EditInsert;
     }
 }
 
 fn edit_insert(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let mut text = edit_chars(app);
-    let col = edit_col(app).min(text.len());
-
     match key.code {
         KeyCode::Esc => {
-            set_edit_col(app, col.saturating_sub(1));
+            if let Some(buf) = app.name_buffer() {
+                buf.left();
+            }
             app.mode = Mode::Edit;
+            return;
         }
-        KeyCode::Enter => app.mode = Mode::Edit,
-        KeyCode::Backspace => {
-            if col > 0 {
-                text.remove(col - 1);
-                set_edit_col(app, col - 1);
-                app.set_edit_text(text.iter().collect());
-            }
-        }
-        KeyCode::Delete => {
-            if col < text.len() {
-                text.remove(col);
-                app.set_edit_text(text.iter().collect());
-            }
-        }
-        KeyCode::Left => set_edit_col(app, col.saturating_sub(1)),
-        KeyCode::Right => set_edit_col(app, (col + 1).min(text.len())),
-        KeyCode::Home => set_edit_col(app, 0),
-        KeyCode::End => set_edit_col(app, text.len()),
-        KeyCode::Char('u') if ctrl => {
-            app.set_edit_text(String::new());
-            set_edit_col(app, 0);
-        }
-        KeyCode::Char('w') if ctrl => {
-            let start = word_start(&text, col);
-            text.drain(start..col);
-            set_edit_col(app, start);
-            app.set_edit_text(text.iter().collect());
-        }
-        KeyCode::Char(c) => {
-            text.insert(col, c);
-            set_edit_col(app, col + 1);
-            app.set_edit_text(text.iter().collect());
+        KeyCode::Enter => {
+            app.mode = Mode::Edit;
+            return;
         }
         _ => {}
     }
-}
 
-fn edit_chars(app: &App) -> Vec<char> {
-    app.edit_text(app.cur).unwrap_or_default().chars().collect()
-}
-
-fn edit_col(app: &App) -> usize {
-    app.edit.as_ref().map_or(0, |edit| edit.col)
-}
-
-fn set_edit_col(app: &mut App, col: usize) {
-    if let Some(edit) = app.edit.as_mut() {
-        edit.col = col;
+    let Some(buf) = app.name_buffer() else { return };
+    match key.code {
+        KeyCode::Backspace => buf.backspace(),
+        KeyCode::Delete => buf.delete_here(),
+        KeyCode::Left => buf.left(),
+        KeyCode::Right => buf.append_here(),
+        KeyCode::Home => buf.jump_start(),
+        KeyCode::End => buf.append_at_end(),
+        KeyCode::Char('u') if ctrl => buf.clear(),
+        KeyCode::Char('w') if ctrl => buf.delete_word_back(),
+        KeyCode::Char(c) => buf.insert(c),
+        _ => {}
     }
 }
 
@@ -299,43 +246,41 @@ fn set_line(app: &mut App, chars: &[char]) {
     app.line_cur = app.line_cur.min(app.line.chars().count());
 }
 
+/// What kind of run a character belongs to, the way vim splits a line: a word
+/// of letters and digits, a run of punctuation, or whitespace between them.
+///
+/// This is why `w` on `ABBA - As` stops on the dash: punctuation is a word of
+/// its own, not a separator to skip over.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Class {
+    Space,
+    Word,
+    Punct,
+}
+
+fn class(c: char) -> Class {
+    if c.is_whitespace() {
+        Class::Space
+    } else if c.is_alphanumeric() || c == '_' {
+        Class::Word
+    } else {
+        Class::Punct
+    }
+}
+
 /// Start of the word at or before `at`, which is where `b` and `ctrl-w` land.
 fn word_start(text: &[char], at: usize) -> usize {
     let mut i = at.min(text.len());
-    while i > 0 && !text[i - 1].is_alphanumeric() {
+    while i > 0 && class(text[i - 1]) == Class::Space {
         i -= 1;
     }
-    while i > 0 && text[i - 1].is_alphanumeric() {
-        i -= 1;
+    if i > 0 {
+        let kind = class(text[i - 1]);
+        while i > 0 && class(text[i - 1]) == kind {
+            i -= 1;
+        }
     }
     i
-}
-
-/// Start of the next word, or the end of the text when there is none.
-///
-/// Not clamped to the last character: `cw` on a single word has to delete that
-/// word entirely, while the `w` motion clamps at the call site.
-fn word_forward(text: &[char], at: usize) -> usize {
-    let mut i = at;
-    while i < text.len() && text[i].is_alphanumeric() {
-        i += 1;
-    }
-    while i < text.len() && !text[i].is_alphanumeric() {
-        i += 1;
-    }
-    i
-}
-
-/// End of the current word, which is where `e` lands.
-fn word_end(text: &[char], at: usize) -> usize {
-    let mut i = at + 1;
-    while i < text.len() && !text[i].is_alphanumeric() {
-        i += 1;
-    }
-    while i + 1 < text.len() && text[i + 1].is_alphanumeric() {
-        i += 1;
-    }
-    i.min(text.len().saturating_sub(1))
 }
 
 fn leave_line(app: &mut App) {
@@ -350,6 +295,16 @@ fn leave_line(app: &mut App) {
 
 #[allow(clippy::too_many_lines)] // it is a keymap: one arm per key reads better flat
 fn normal_mode(app: &mut App, key: KeyEvent) {
+    if app.show_changes {
+        if matches!(
+            key.code,
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter
+        ) {
+            app.show_changes = false;
+        }
+        return;
+    }
+
     // The help window takes the keyboard while it is up, like a help buffer.
     if app.show_help {
         help_key(app, key);
@@ -390,8 +345,17 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
             app.line.clear();
         }
         KeyCode::Esc => {
+            app.exit_visual();
             app.msg = None;
             app.show_help = false;
+        }
+        KeyCode::Char('v' | 'V') => {
+            if app.mode == Mode::Visual {
+                app.exit_visual();
+            } else {
+                app.mode = Mode::Visual;
+                app.visual_anchor = Some(app.cur);
+            }
         }
         KeyCode::Char('c') if ctrl => app.info("type  :q  to quit vibox"),
         KeyCode::F(1) => app.show_help = !app.show_help,
@@ -443,7 +407,12 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
         // ---- playback ----------------------------------------------------
         KeyCode::Enter => {
             if app.focus == Pane::Folders {
-                app.focus = Pane::Tracks;
+                // Enter opens, on both tabs: moving the cursor never changes
+                // what the track pane shows.
+                match app.tab {
+                    Tab::Playlists => app.open_playlist(),
+                    Tab::Folders => app.open_folder(),
+                }
             } else {
                 app.play_cursor();
             }
@@ -483,6 +452,7 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
             }
             None => app.error("no audio device: playback is disabled"),
         },
+        KeyCode::Char('r') if ctrl => app.redo(),
         KeyCode::Char('r') => {
             app.repeat = app.repeat.next();
             let name = app.repeat.name();
@@ -494,8 +464,49 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
             app.info(if on { "shuffle on" } else { "shuffle off" });
         }
 
+        KeyCode::Char('t') if app.focus == Pane::Folders => app.open_in_new_tab(),
+        // A new playlist is a name, so it goes through the command line where
+        // you can see and edit it before it exists.
+        KeyCode::Char('o' | 'O') if app.focus == Pane::Folders => {
+            app.mode = Mode::Command;
+            app.line_prefix = ':';
+            app.line = match app.tab {
+                Tab::Playlists => "mkplaylist ".to_string(),
+                Tab::Folders => "mkdir ".to_string(),
+            };
+            app.line_cur = app.line.chars().count();
+        }
+
+        // ---- playlists ---------------------------------------------------
+        KeyCode::Char('y') => {
+            if app.mode == Mode::Visual {
+                app.yank_selection();
+            } else {
+                app.pending = Some('y');
+            }
+        }
+        KeyCode::Char('d') => {
+            if app.mode == Mode::Visual {
+                delete_selection(app);
+            } else {
+                app.pending = Some('d');
+            }
+        }
+        KeyCode::Char('x') if app.focus == Pane::Tracks => delete_selection(app),
+        // `p` puts what you have: cut files move, yanked files copy, and in a
+        // playlist the yank goes in as entries.
+        KeyCode::Char('p') => {
+            if !app.move_cut_here() && !app.copy_yank_here() {
+                app.paste_into_playlist();
+            }
+        }
+        KeyCode::Char('u') => app.undo(),
+        KeyCode::Char('J') => app.move_in_playlist(count as isize),
+        KeyCode::Char('K') => app.move_in_playlist(-(count as isize)),
+
         // ---- editing -----------------------------------------------------
         KeyCode::Char('c') if app.focus == Pane::Tracks => app.begin_edit(),
+        KeyCode::Char('c') if app.focus == Pane::Folders => app.begin_sidebar_edit(),
         KeyCode::Char('Z') => app.pending = Some('Z'),
 
         _ => clear_count = false,
@@ -551,12 +562,43 @@ fn pending_key(app: &mut App, prefix: char, key: KeyEvent, count: usize, has_cou
                 app.error("nothing playing in this view");
             }
         }
+        // vim's own tab keys, acting on whichever pane has the keyboard.
+        ('g', KeyCode::Char(c @ ('t' | 'T'))) => {
+            if app.focus == Pane::Folders {
+                app.tab = match app.tab {
+                    Tab::Folders => Tab::Playlists,
+                    Tab::Playlists => Tab::Folders,
+                };
+                if app.tab == Tab::Playlists {
+                    app.reload_playlists();
+                }
+            } else {
+                app.cycle_tab(if c == 't' { 1 } else { -1 });
+            }
+        }
         ('z', KeyCode::Char(c @ ('z' | 't' | 'b'))) => app.scroll_cursor_to(c),
+        ('y', KeyCode::Char('y')) => app.yank_selection(),
+        ('d', KeyCode::Char('d')) => match (app.focus, app.tab) {
+            (Pane::Folders, Tab::Playlists) => app.delete_playlist(),
+            (Pane::Folders, Tab::Folders) => app.cut_folder(),
+            (Pane::Tracks, _) => delete_selection(app),
+        },
         ('Z', KeyCode::Char('Z' | 'Q')) => app.quit = true,
         ('\u{17}', KeyCode::Char('h' | 'k')) => app.focus = Pane::Folders,
         ('\u{17}', KeyCode::Char('l' | 'j')) => app.focus = Pane::Tracks,
         ('\u{17}', KeyCode::Char('w')) => toggle_pane(app),
         _ => {}
+    }
+}
+
+/// `dd`, `d` in visual, and `x`: what they delete depends on what you are
+/// looking at. In a playlist it is the entry, in a folder it is the file, and
+/// the file case needs danger on.
+fn delete_selection(app: &mut App) {
+    if app.playlist_view.is_some() {
+        app.remove_from_playlist();
+    } else {
+        app.cut_tracks();
     }
 }
 
@@ -568,9 +610,10 @@ fn toggle_pane(app: &mut App) {
 }
 
 fn step(app: &mut App, delta: isize) {
-    match app.focus {
-        Pane::Tracks => app.move_cursor(delta),
-        Pane::Folders => app.move_folder(delta),
+    match (app.focus, app.tab) {
+        (Pane::Tracks, _) => app.move_cursor(delta),
+        (Pane::Folders, Tab::Folders) => app.move_folder(delta),
+        (Pane::Folders, Tab::Playlists) => app.move_playlist(delta),
     }
 }
 
@@ -604,4 +647,19 @@ fn volume(app: &mut App, delta: i32) {
     audio.nudge_volume(delta);
     let v = audio.volume();
     app.info(format!("volume {v}%"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ctrl-w` on the command line, which is the only motion left in here now
+    /// that names are edited through `NameBuffer`.
+    #[test]
+    fn ctrl_w_deletes_back_to_the_start_of_the_word() {
+        let text: Vec<char> = "late night mix".chars().collect();
+        assert_eq!(word_start(&text, text.len()), 11);
+        assert_eq!(word_start(&text, 11), 5);
+        assert_eq!(word_start(&text, 0), 0);
+    }
 }

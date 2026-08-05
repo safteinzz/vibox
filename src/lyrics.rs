@@ -14,6 +14,11 @@ use std::time::Duration;
 
 use crate::library::Track;
 
+/// Stamped on every cache entry. Bump it when what gets cached changes
+/// meaning: entries without the current marker are refetched rather than
+/// trusted, since an old one cannot say whether its timings were believed.
+const CACHE_MARK: &str = "[vibox:1]";
+
 const AGENT: &str = concat!(
     "vibox/",
     env!("CARGO_PKG_VERSION"),
@@ -326,13 +331,16 @@ fn cache_path(track: &Path) -> Option<PathBuf> {
 /// no lyrics is not looked up again on every play.
 fn load_cached(track: &Path) -> Option<(Lyrics, i64)> {
     let text = std::fs::read_to_string(cache_path(track)?).ok()?;
+    // Written by an older vibox: refetch rather than believe its timestamps.
+    let text = text.strip_prefix(CACHE_MARK)?;
+
     if text.trim().is_empty() {
         return Some((
             Lyrics::Missing("no lyrics on lrclib for this track".into()),
             0,
         ));
     }
-    Some(parse_with_offset(&text))
+    Some(parse_with_offset(text))
 }
 
 fn store_cached(track: &Path, lyrics: &Lyrics, offset: i64) {
@@ -362,11 +370,7 @@ fn store_cached(track: &Path, lyrics: &Lyrics, offset: i64) {
         Lyrics::Plain(lines) => lines.join("\n"),
         Lyrics::Missing(_) => String::new(),
     };
-    if body.is_empty() {
-        let _ = std::fs::write(path, body);
-    } else {
-        let _ = std::fs::write(path, format!("{head}{body}"));
-    }
+    let _ = std::fs::write(path, format!("{CACHE_MARK}\n{head}{body}"));
 }
 
 /// Percent encodes everything a query string cannot carry literally.

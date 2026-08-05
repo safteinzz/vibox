@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, Mode, Pane};
+use crate::app::{App, Mode, Pane, Renaming, Tab};
 use crate::library::fmt_duration;
 
 const FOLDER_W: u16 = 30;
@@ -25,6 +25,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
+
+    // Claimed by whichever pane is inserting, so the terminal draws its own
+    // thin bar there instead of a painted block.
+    app.cursor_screen = None;
 
     let folder_w = FOLDER_W.min(main.width / 2);
     // Lyrics only take a pane when the track list can still breathe; on a
@@ -73,9 +77,40 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_lyrics && lyrics_w == 0 {
         draw_lyrics_popup(frame, app, frame.area());
     }
+    if app.show_changes {
+        draw_changes(frame, app, frame.area());
+    }
     if app.show_help {
         draw_help(frame, app, frame.area());
     }
+}
+
+/// `:changes`: exactly what a `:w` would write, before you press it.
+fn draw_changes(frame: &mut Frame, app: &App, area: Rect) {
+    let changes = app.pending_changes();
+    let body: Vec<Line> = if changes.is_empty() {
+        vec![Line::styled(" nothing to write", dim())]
+    } else {
+        changes
+            .iter()
+            .map(|line| Line::raw(format!(" {line}")))
+            .collect()
+    };
+
+    let w = 76.min(area.width.saturating_sub(4));
+    let h = (body.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: (area.width.saturating_sub(w)) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
+    let block = Block::bordered().title(" :w would do this, q closes ");
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(body), inner);
 }
 
 /// Wraps one lyric at the pane width, indenting the runover so a long line
@@ -207,6 +242,15 @@ fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+/// The row being renamed, in any pane.
+///
+/// Deliberately not the reversed cursor style: reversing a row that already
+/// carries a coloured cursor block hides the block, which is how the cursor
+/// went missing in the sidebar.
+fn editing_style() -> Style {
+    Style::default().bg(Color::Indexed(236))
+}
+
 /// Cursor line: reversed when the pane has focus, dimmed when it does not.
 fn cursor_style(focused: bool) -> Style {
     if focused {
@@ -252,8 +296,32 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(if focused { Style::default() } else { dim() });
-    let inner = block.inner(area);
+    let whole = block.inner(area);
     frame.render_widget(block, area);
+
+    // Tab header, lit on the side you are looking at. `gt` switches.
+    let [head, inner] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(whole);
+    let lit = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let (folders_style, playlists_style) = match app.tab {
+        Tab::Folders => (lit, dim()),
+        Tab::Playlists => (dim(), lit),
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" folders", folders_style),
+            Span::styled(" | ", dim()),
+            Span::styled("playlists", playlists_style),
+        ])),
+        head,
+    );
+
+    if app.tab == Tab::Playlists {
+        draw_playlists(frame, app, inner, focused);
+        return;
+    }
 
     app.folder_h = inner.height as usize;
     if app.folder_cur < app.folder_top {
@@ -265,7 +333,9 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let w = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
-    for row in app.folder_top..(app.folder_top + inner.height as usize) {
+    let mut cursor_at = None;
+    let rows = app.folder_top..(app.folder_top + inner.height as usize);
+    for (shown, row) in (0_u16..).zip(rows) {
         if row > app.folders.len() {
             break;
         }
@@ -274,15 +344,99 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             app.folders[row - 1].0.clone()
         };
-        let style = if row == app.folder_cur {
+        // The name a rename would give it, whether typed now or waiting for `:w`.
+        let renamed = app
+            .folders
+            .get(row.wrapping_sub(1))
+            .and_then(|(_, path)| app.shown_name(&Renaming::Folder(path.clone())));
+        let editing = row == app.folder_cur
+            && matches!(app.mode, Mode::Edit | Mode::EditInsert)
+            && matches!(app.renaming(), Some(Renaming::Folder(_)));
+        let label = renamed.unwrap_or(label);
+        let doomed = row > 0 && app.folders.get(row - 1).is_some_and(|(_, p)| app.is_doomed_dir(p));
+        let mut style = if editing {
+            editing_style()
+        } else if row == app.folder_cur {
             cursor_style(focused)
         } else {
             Style::default()
         };
-        lines.push(Line::styled(truncate(&label, w), style));
+        if doomed {
+            style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT);
+        }
+        if editing {
+            let col = app.name_col();
+            if app.mode == Mode::EditInsert {
+                let before: String = label.chars().take(col).collect();
+                let x = inner.x + u16::try_from(before.width()).unwrap_or(0);
+                cursor_at = Some((x.min(inner.right().saturating_sub(1)), inner.y + shown));
+                lines.push(Line::styled(truncate(&label, w), style));
+            } else {
+                lines.push(row_with_cursor(&truncate(&label, w), col, style, app.mode));
+            }
+        } else {
+            lines.push(Line::styled(truncate(&label, w), style));
+        }
     }
 
+    if cursor_at.is_some() {
+        app.cursor_screen = cursor_at;
+    }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The saved playlists, listed by name.
+fn draw_playlists(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
+    app.folder_h = area.height as usize;
+    let w = area.width as usize;
+
+    if app.playlists.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(" no playlists yet", dim()),
+                Line::from(""),
+                Line::styled(" :w late night", dim()),
+                Line::styled(" saves this view", dim()),
+            ]),
+            area,
+        );
+        return;
+    }
+
+    let lines: Vec<Line> = (app.pl_top..(app.pl_top + area.height as usize))
+        .filter_map(|row| app.playlists.get(row).map(|(name, _)| (row, name)))
+        .map(|(row, name)| {
+            let doomed = app
+                .playlists
+                .get(row)
+                .is_some_and(|(_, path)| app.is_doomed(path));
+            let renamed = app.shown_name(&Renaming::Playlist(name.clone()));
+            let editing = row == app.pl_cur
+                && matches!(app.mode, Mode::Edit | Mode::EditInsert)
+                && matches!(app.renaming(), Some(Renaming::Playlist(_)));
+            let mut style = if editing {
+                editing_style()
+            } else if row == app.pl_cur {
+                cursor_style(focused)
+            } else {
+                Style::default()
+            };
+            if doomed {
+                style = style
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::CROSSED_OUT);
+            }
+
+            let shown = renamed.unwrap_or_else(|| name.clone());
+            if editing {
+                let col = app.name_col();
+                row_with_cursor(&truncate(&shown, w), col, style, app.mode)
+            } else {
+                Line::styled(truncate(&shown, w), style)
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Cells before the first column: the sign, a space, the line number, a space.
@@ -334,6 +488,31 @@ fn duration_width(app: &App) -> usize {
 }
 
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Tab bar on top when more than one view is open, then the sticky header.
+    // Always shown, even with one tab: naming the view beats guessing it.
+    let labels = app.tab_labels();
+    let area = {
+        let [bar, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let mut spans = Vec::new();
+        for (i, (name, dirty)) in labels.iter().enumerate() {
+            let style = if i == app.tab_idx {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                dim()
+            };
+            spans.push(Span::styled(
+                format!(" {name}{} ", if *dirty { "*" } else { "" }),
+                style,
+            ));
+            spans.push(Span::styled("│", dim()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), bar);
+        rest
+    };
+
     // The header sticks: the rows scroll under it.
     let [head, area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -362,15 +541,38 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 
     if app.view.is_empty() {
-        let root = app.root.display().to_string();
-        let msg = vec![
-            Line::styled(format!("  no tracks under {root}"), dim()),
-            Line::from(""),
-            Line::styled("  :e ~/Music     load a library", dim()),
-            Line::styled("  :help          keys", dim()),
-        ];
+        // An empty playlist is waiting to be filled; an empty library is a
+        // different problem, so they get different instructions.
+        let msg = if let Some(name) = app.playlist_view.clone() {
+            vec![
+                Line::styled(format!("  `{name}` is empty"), dim()),
+                Line::from(""),
+                Line::styled("  gt then t     open a folder in its own tab", dim()),
+                Line::styled("  V then y      pick the tracks you want", dim()),
+                Line::styled("  gt then p     bring them back here", dim()),
+                Line::styled("  :w            save it", dim()),
+            ]
+        } else {
+            let root = app.root.display().to_string();
+            vec![
+                Line::styled(format!("  no tracks under {root}"), dim()),
+                Line::from(""),
+                Line::styled("  :set root=~/Music   make that your library", dim()),
+                Line::styled("  :e ~/Music          open one just for now", dim()),
+                Line::styled("  :help               keys", dim()),
+            ]
+        };
         frame.render_widget(Paragraph::new(msg), area);
         return;
+    }
+
+    // Slide the file column so the cursor stays on screen while editing. The
+    // buffer keeps its own window, so this is one call.
+    if app.renaming_a_track()
+        && let Some(file_w) = cols.iter().find(|(n, _)| *n == "file").map(|(_, w)| *w)
+        && let Some(buf) = app.name_buffer()
+    {
+        buf.follow(file_w);
     }
 
     let focused = app.focus == Pane::Tracks;
@@ -399,30 +601,51 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             format!("{:>num_w$}", app.cur.abs_diff(row))
         };
 
-        let editing_row =
-            is_cursor && matches!(app.mode, Mode::Edit | Mode::EditInsert);
+        // Only when the tracks are what `c` opened: a sidebar rename must not
+        // put a cursor in this pane as well.
+        let editing_row = is_cursor
+            && matches!(app.mode, Mode::Edit | Mode::EditInsert)
+            && app.renaming_a_track();
 
-        let base = if editing_row {
-            // A reversed row would swallow the cursor cell, so while editing the
-            // row only gets a quiet background and the cursor does the work.
-            Style::default().bg(Color::Indexed(236))
+        let doomed_file = app.is_doomed_file(&track.path) || app.is_cut(&track.path);
+        let (sel_a, sel_b) = app.selection_range();
+        let base = if app.mode == Mode::Visual && row >= sel_a && row <= sel_b {
+            Style::default().bg(Color::Indexed(238))
+        } else if editing_row {
+            editing_style()
         } else if is_cursor {
             cursor_style(focused)
+        } else if doomed_file {
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::CROSSED_OUT)
         } else if is_playing {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default()
         };
 
-        // In edit mode the file column shows the pending name instead.
-        let edited = app.edit.as_ref().and_then(|edit| edit.pending.get(&track_idx));
-        let changed = edited.is_some_and(|name| *name != track.file);
+        // The name a rename would give it, typed now or waiting for `:w`.
+        let edited: Option<String> = app.shown_name(&Renaming::Track(track_idx));
+        let changed = edited.as_ref().is_some_and(|name| *name != track.file);
         let sign = if changed { '~' } else { sign };
+
+        // The row being edited shows the name from its own scroll offset, so a
+        // long one slides under the cursor instead of ending in an ellipsis.
+        let scrolled: Option<String> = editing_row.then(|| {
+            let scroll = app.name_scroll();
+            edited
+                .clone()
+                .unwrap_or_else(|| track.file.clone())
+                .chars()
+                .skip(scroll)
+                .collect()
+        });
 
         let mut body = format!("{sign} {number} ");
         for (name, width) in &cols {
             let value = match *name {
-                "file" => edited.unwrap_or(&track.file),
+                "file" => scrolled.as_ref().or(edited.as_ref()).unwrap_or(&track.file),
                 "title" => &track.title,
                 "artist" => &track.artist,
                 _ => &track.album,
@@ -434,7 +657,8 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
 
         if editing_row {
             // The cursor sits in the name itself, just past the gutter.
-            let col = app.edit.as_ref().map_or(0, |edit| edit.col);
+            let scroll = app.name_scroll();
+            let col = app.name_col().saturating_sub(scroll);
             if app.mode == Mode::EditInsert {
                 // Insert uses the terminal's own cursor, so the shape can be a
                 // thin bar. Painting a cell here would show a block instead.
@@ -442,6 +666,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                     .edit_text(row)
                     .unwrap_or_default()
                     .chars()
+                    .skip(scroll)
                     .take(col)
                     .collect();
                 let x = area.x
@@ -457,7 +682,9 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    app.cursor_screen = cursor_at;
+    if cursor_at.is_some() {
+        app.cursor_screen = cursor_at;
+    }
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -491,6 +718,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         .fg(match app.mode {
             Mode::Normal => Color::Blue,
             Mode::Command | Mode::Search => Color::Yellow,
+            Mode::Visual => Color::Magenta,
             Mode::Edit | Mode::EditInsert => Color::Red,
         });
 
@@ -530,11 +758,23 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     );
 
     let left = format!(" {} ", app.mode.label());
+    // Which pane has the keyboard, so `dd` never surprises anyone.
+    let where_ = match (app.focus, app.tab) {
+        (Pane::Folders, Tab::Playlists) => " PLAYLISTS ",
+        (Pane::Folders, Tab::Folders) => " FOLDERS ",
+        (Pane::Tracks, _) => "",
+    };
+    // vim's modified marker: something is typed but not written.
+    let dirty = if app.unsaved() { " [+] " } else { "" };
     let vol = format!(" vol {vol} ");
 
     // The track name is the only elastic part: everything else has to fit, or
     // a five digit track count gets its last digit shaved off.
-    let fixed = left.chars().count() + vol.chars().count() + right.chars().count();
+    let fixed = left.chars().count()
+        + where_.len()
+        + dirty.len()
+        + vol.chars().count()
+        + right.chars().count();
     let middle = truncate(
         &format!(" {now} "),
         (area.width as usize).saturating_sub(fixed),
@@ -543,6 +783,18 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(left, mode_style),
+            Span::styled(
+                where_,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            ),
+            Span::styled(
+                dirty,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(middle, Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(vol, Style::default().fg(Color::Green)),
             Span::styled(right, dim()),
@@ -639,17 +891,19 @@ type HelpSection = (&'static str, &'static [(&'static str, &'static str)]);
 
 const HELP: &[HelpSection] = &[
     (
-        "windows and modes",
+        "windows and tabs",
         &[
-            ("tab, ctrl-w h/l", "move between the folder pane and the tracks"),
-            ("V", "visual line mode, esc leaves it"),
-            (":", "the command line"),
+            ("tab, ctrl-w h/l", "move between the side pane and the tracks"),
+            ("gt gT", "switch tabs in whichever pane has the keyboard"),
+            ("enter", "open the folder or playlist under the cursor"),
+            ("t", "open it in a tab of its own instead"),
+            (":q", "close the tab, and the last one closes vibox"),
+            (":qa, ZZ", "quit, whatever is open"),
             ("F1, :help", "this window, q or esc closes it"),
-            (":q, ZZ", "quit"),
         ],
     ),
     (
-        "movement",
+        "moving",
         &[
             ("j k", "down, up, and with a count: 8j"),
             ("gg G, 12G", "first row, last row, row 12"),
@@ -659,52 +913,62 @@ const HELP: &[HelpSection] = &[
             ("zz zt zb", "window around the cursor"),
             ("ctrl-e ctrl-y", "scroll the window, leave the cursor"),
             ("gp", "jump to whatever is playing"),
+            ("/ ?, n N", "search files, artists and albums, then repeat it"),
         ],
     ),
     (
-        "playback",
+        "playing",
         &[
             ("enter", "play this track, queue the rest of the view"),
             ("space", "pause, resume"),
             ("h l", "seek 5s back, forward, and 30l seeks 30s"),
             ("< >", "previous, next in the queue"),
-            ("+ -", "volume, and 20+ raises it by 20"),
-            ("m", "mute"),
-            ("[ ]", "shift the lyrics earlier, later, kept per file"),
+            ("+ -, m", "volume, and 20+ raises it by 20; mute"),
             ("r", "repeat: off, all, one"),
             ("s", "shuffle the queue on, off"),
         ],
     ),
     (
-        "search",
+        "changing things",
         &[
-            ("/ ?", "forward, backward: title, artist, album, path"),
-            ("n N", "next match, previous match"),
+            ("", "nothing reaches the disk until `:w`"),
+            ("c", "rename what the cursor is on: a track, folder or playlist"),
+            ("i a I A", "insert while renaming, esc goes back to the motions"),
+            ("cw cc dw x D C", "the usual operators, inside the name"),
+            ("j k", "while renaming, take the name and move to the next row"),
+            ("V, y", "select a run of tracks, yank the selection"),
+            ("p", "put the yank in a playlist, or the cut in a folder"),
+            ("dd x", "cut: a playlist entry, a playlist, or a file"),
+            ("J K", "move the selection down, up, inside a playlist"),
+            ("o", "new playlist or folder, by name"),
+            ("u, ctrl-r", "undo, redo anything still waiting"),
+            (":ch", "list exactly what `:w` would do"),
+            (":w", "do all of it; `:w mix` saves the view as a playlist"),
+            (":e!", "throw away what is waiting"),
         ],
     ),
     (
-        "renaming files",
+        "danger mode, off by default",
         &[
-            ("c", "edit the names in the list, vi motions inside the row"),
-            ("i a I A", "insert, and esc goes back to the motions"),
-            ("cw cc dw x D C", "the operators, on the name under the cursor"),
-            ("j k", "move to another row, still editing"),
-            (":w", "rename every changed file at once"),
-            (":e!", "throw the pending renames away"),
+            (":set danger", "let vibox move, copy and delete your files"),
+            ("dd", "cut tracks, or a folder and all of it; never put back, deleted"),
+            ("d then p", "put them somewhere else instead: a move, like vim"),
+            ("y then p", "copy them into another folder"),
+            (":mkdir jazz", "a new folder under the library root"),
         ],
     ),
     (
         "the library",
         &[
-            (":e ~/Music", "open a directory as the library"),
-            (":e mix.m3u", "open an m3u playlist, in its own order"),
+            (":set root=~/Music", "the library vibox opens on its own"),
+            (":e ~/Music", "open a directory or an m3u for now"),
             (":reload", "rescan from disk"),
             (":sort artist", "path, title, artist, album, duration"),
-            (":vol 70, :vol +5", "volume"),
-            (":seek 1:30, :seek +30", "seek"),
             (":set artist!", "flip a column: file, title, artist, album"),
-            (":set lyrics", "lyrics pane for the playing track, from lrclib"),
-            (":mkrc", "keep the current :set options for next time"),
+            (":set lyrics", "lyrics for the playing track, from lrclib"),
+            ("[ ]", "shift those lyrics earlier, later, kept per file"),
+            (":vol 70, :seek 1:30", "volume and position"),
+            (":mkrc", "keep the options you have set"),
             (":42", "jump to row 42"),
         ],
     ),
@@ -731,6 +995,11 @@ fn help_lines() -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         ));
         for (keys, what) in *entries {
+            // An entry with no key is a note about the section itself.
+            if keys.is_empty() {
+                lines.push(Line::styled(format!("  {what}"), dim()));
+                continue;
+            }
             lines.push(Line::from(vec![
                 Span::styled(format!("  {keys:<22}"), Style::default().fg(Color::Yellow)),
                 Span::raw(*what),
@@ -744,9 +1013,9 @@ pub fn help_len() -> usize {
     help_lines().len()
 }
 
-fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
     let lines = help_lines();
-    let w = 74.min(area.width.saturating_sub(4));
+    let w = 88.min(area.width.saturating_sub(4));
     let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let popup = Rect {
         x: (area.width.saturating_sub(w)) / 2,
@@ -768,6 +1037,9 @@ fn draw_help(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
 
-    let top = app.help_scroll.min(lines.len().saturating_sub(shown));
+    // Clamped here, where the height is known: scrolling past the end would
+    // otherwise pile up invisibly and take as many presses to undo.
+    app.help_scroll = app.help_scroll.min(lines.len().saturating_sub(shown));
+    let top = app.help_scroll;
     frame.render_widget(Paragraph::new(lines[top..].to_vec()), inner);
 }

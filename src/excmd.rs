@@ -42,10 +42,25 @@ pub fn run(app: &mut App, line: &str) {
 
     match cmd.name {
         "q" | "qa" | "quit" | "qall" | "x" => {
-            if app.edit_dirty() && !cmd.bang {
-                app.error("no write since last change: `:w` renames, `:q!` throws it away");
+            let all = cmd.name == "qa" || cmd.name == "qall";
+            // Like vim: `:q` cares about the tab it is closing, `:qa` cares
+            // about everything. Closing a clean tab is never blocked by changes
+            // sitting in a different one.
+            let closing_a_tab = !all && app.tabs.len() > 1;
+            let blocked = if closing_a_tab {
+                app.playlist_dirty
             } else {
+                app.unsaved()
+            };
+
+            if blocked && !cmd.bang {
+                app.error(
+                    "no write since last change: `:ch` lists it, `:w` saves, `:q!` throws it away",
+                );
+            } else if all {
                 app.quit = true;
+            } else {
+                app.close_tab();
             }
         }
         // `:e!` with pending renames is vim's "throw it away and reread".
@@ -65,11 +80,13 @@ pub fn run(app: &mut App, line: &str) {
             }
             Err(e) => app.error(format!("{e}")),
         },
+        // One `:w` writes everything outstanding: the pending renames and the
+        // playlist you reordered. With a name it saves the view as a new one.
         "w" | "write" | "save" => {
-            if app.edit.is_some() {
-                app.apply_edits();
+            if !cmd.args.is_empty() {
+                app.save_playlist(cmd.args);
             } else {
-                app.error("nothing to write: `c` edits filenames, `:w` renames them");
+                app.write_all();
             }
         }
         "vol" | "volume" => volume(app, cmd.args),
@@ -140,6 +157,9 @@ pub fn run(app: &mut App, line: &str) {
             let on = app.matrix.on;
             app.info(if on { "wake up..." } else { "" });
         }
+        "mkplaylist" | "mkpl" => app.create_playlist(cmd.args),
+        "mkdir" => app.make_dir(cmd.args),
+        "changes" | "ch" => app.show_changes = true,
         "h" | "help" => app.show_help = true,
         other => app.error(format!("not a vibox command: `{other}` - see :help")),
     }
@@ -153,6 +173,32 @@ fn set(app: &mut App, args: &str) {
         return;
     }
 
+    // `root=<path>` is the one option with a value: the library vibox opens
+    // when it is started with no path.
+    if let Some(rest) = args.strip_prefix("root=") {
+        let path = expand(rest.trim());
+        match app.open(&path) {
+            Ok(()) => {
+                let shown = path.display().to_string();
+                app.music = Some(path);
+                app.info(format!("library is {shown}, `:mkrc` keeps it"));
+            }
+            Err(e) => app.error(format!("{e}")),
+        }
+        return;
+    }
+    if args.trim() == "root?" {
+        let shown = app
+            .music
+            .clone()
+            .unwrap_or_else(|| app.root.clone())
+            .display()
+            .to_string();
+        app.info(format!("root={shown}"));
+        return;
+    }
+
+    let mut touched: Vec<String> = Vec::new();
     for word in args.split_whitespace() {
         let (name, action) = match word {
             w if w.ends_with('?') => (w.trim_end_matches('?'), '?'),
@@ -177,9 +223,20 @@ fn set(app: &mut App, args: &str) {
             '0' => set_option(app, name, false),
             _ => set_option(app, name, true),
         }
+
+        // Report back only what was touched. Listing every option on a toggle
+        // buries the answer to the question that was actually asked.
+        let now = option(app, name).unwrap_or(false);
+        touched.push(format!("{}{name}", if now { "" } else { "no" }));
     }
 
-    app.info(list_options(app));
+    // An option only lasts the session until `:mkrc` writes it, so say so
+    // every time rather than expecting anyone to remember.
+    let mut line = format!("{} | `:mkrc` keeps these", touched.join(" "));
+    if app.danger {
+        line.push_str(" | measure twice, `:w` once");
+    }
+    app.info(line);
 }
 
 /// Where the last session is remembered. This is state, not configuration, so
@@ -203,7 +260,7 @@ pub fn save_state(app: &App) {
     let volume = app.audio.as_ref().map_or(80, super::player::Audio::volume);
     let body = format!(
         "\" last session, overwritten on quit. edit viboxrc instead\nset {}\nvol {volume}\nshuffle {}\nrepeat {}\n",
-        list_options(app),
+        saved_options(app),
         if app.shuffle { "on" } else { "off" },
         app.repeat.name(),
     );
@@ -231,6 +288,17 @@ pub fn load_state(app: &mut App) {
 /// `~/.config/vibox/viboxrc`, a file of ex commands run at startup.
 pub fn rc_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("vibox/viboxrc"))
+}
+
+/// The library named by `set root=` in the rc file, read before any state
+/// exists so startup can open it.
+pub fn configured_music() -> Option<PathBuf> {
+    let text = std::fs::read_to_string(rc_path()?).ok()?;
+    text.lines()
+        .map(str::trim)
+        .filter_map(|line| line.trim_start_matches(':').strip_prefix("set root="))
+        .next_back()
+        .map(|value| expand(value.trim()))
 }
 
 /// Runs the rc file. Every line is an ex command without its `:`, and `"`
@@ -264,7 +332,16 @@ fn mkrc(app: &mut App, bang: bool) {
         return;
     }
 
-    let body = format!("\" written by :mkrc\nset {}\n", list_options(app));
+    let music = app
+        .music
+        .clone()
+        .unwrap_or_else(|| app.root.clone())
+        .display()
+        .to_string();
+    let body = format!(
+        "\" written by :mkrc\nset root={music}\nset {}\n",
+        saved_options(app)
+    );
     let wrote = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
@@ -283,21 +360,39 @@ fn mkrc(app: &mut App, bang: bool) {
 }
 
 /// Every `:set` option: the tag columns, plus the panes that can be turned off.
-const OPTIONS: [&str; 5] = ["file", "title", "artist", "album", "lyrics"];
+const OPTIONS: [&str; 6] = ["file", "title", "artist", "album", "lyrics", "danger"];
 
 fn option(app: &App, name: &str) -> Option<bool> {
     match name {
         "lyrics" => Some(app.show_lyrics),
+        "danger" => Some(app.danger),
         other => app.columns.get(other),
     }
 }
 
 fn set_option(app: &mut App, name: &str, on: bool) {
-    if name == "lyrics" {
+    if name == "danger" {
+        app.danger = on;
+    } else if name == "lyrics" {
         app.show_lyrics = on;
     } else {
         app.columns.set(name, on);
     }
+}
+
+/// The options written to disk. `danger` is deliberately absent: it must be
+/// turned on for the session you want it in, or typed into the rc file by hand.
+/// Persisting it silently is how it ends up on when nobody meant it to be.
+fn saved_options(app: &App) -> String {
+    OPTIONS
+        .iter()
+        .filter(|name| **name != "danger")
+        .map(|name| {
+            let on = option(app, name).unwrap_or(false);
+            format!("{}{name}", if on { "" } else { "no" })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn list_options(app: &App) -> String {
@@ -308,7 +403,7 @@ fn list_options(app: &App) -> String {
             format!("{}{name}", if on { "" } else { "no" })
         })
         .collect::<Vec<_>>()
-        .join("  ")
+        .join(" ")
 }
 
 fn edit(app: &mut App, args: &str, _bang: bool) {
@@ -425,3 +520,55 @@ fn expand(arg: &str) -> PathBuf {
     PathBuf::from(arg)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bang_is_split_off_the_command_name() {
+        let cmd = parse("q!").unwrap();
+        assert_eq!(cmd.name, "q");
+        assert!(cmd.bang);
+        assert_eq!(cmd.args, "");
+    }
+
+    #[test]
+    fn arguments_keep_the_spaces_inside_them() {
+        let cmd = parse("  w  late night mix  ").unwrap();
+        assert_eq!(cmd.name, "w");
+        assert_eq!(cmd.args, "late night mix");
+    }
+
+    #[test]
+    fn an_empty_line_is_not_a_command() {
+        assert!(parse("   ").is_none());
+        assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn volume_takes_absolute_and_relative_values() {
+        assert_eq!(parse_delta("70"), Some(Delta::Absolute(70)));
+        assert_eq!(parse_delta("+5"), Some(Delta::Relative(5)));
+        assert_eq!(parse_delta("-15"), Some(Delta::Relative(-15)));
+        assert_eq!(parse_delta("loud"), None);
+    }
+
+    #[test]
+    fn seek_accepts_clock_time_as_well_as_seconds() {
+        assert_eq!(parse_seek("1:30"), Some(Delta::Absolute(90)));
+        assert_eq!(parse_seek("0:07"), Some(Delta::Absolute(7)));
+        assert_eq!(parse_seek("90"), Some(Delta::Absolute(90)));
+        assert_eq!(parse_seek("+30"), Some(Delta::Relative(30)));
+        assert_eq!(parse_seek("1:75"), None, "seconds past 59 are a typo");
+        assert_eq!(parse_seek(""), None);
+    }
+
+    #[test]
+    fn sort_keys_have_the_short_forms_a_vi_user_would_try() {
+        assert_eq!(SortKey::parse("t"), Some(SortKey::Title));
+        assert_eq!(SortKey::parse("al"), Some(SortKey::Album));
+        assert_eq!(SortKey::parse("duration"), Some(SortKey::Duration));
+        assert_eq!(SortKey::parse("nope"), None);
+    }
+}
