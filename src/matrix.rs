@@ -7,6 +7,11 @@
 use ratatui::Frame;
 use ratatui::style::{Color, Modifier, Style};
 
+/// Rows a full volume drop falls per frame. Raising it stretches the whole
+/// range, so a fast track hits harder and the gap between quiet and loud parts
+/// gets wider, not just faster.
+const FALL: f32 = 7.2;
+
 /// Latin and digits only: no glyph here needs a font the terminal might lack.
 const GLYPHS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789=+*<>[]{}/\\|-_$#@%&";
 
@@ -63,7 +68,7 @@ impl Matrix {
         self.drops.truncate(width);
 
         // Nothing playing, nothing falling: it is a visualiser, not a screensaver.
-        let push = level * 6.0;
+        let push = level * FALL;
         if push <= f32::EPSILON {
             // The frame counter drives the glyph shuffle too, so leaving it to
             // tick would keep the letters churning on a frozen screen.
