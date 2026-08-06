@@ -237,7 +237,13 @@ pub fn sort(tracks: &mut [Track], key: SortKey) {
 
 /// The directories that actually contain tracks, as shown in the left pane.
 pub fn folders(tracks: &[Track], root: &Path) -> Vec<(String, PathBuf)> {
-    let mut dirs: BTreeSet<PathBuf> = tracks.iter().map(|t| t.dir().to_path_buf()).collect();
+    // Only what is under the root: a playlist can name files from anywhere,
+    // and those directories are not part of this library.
+    let mut dirs: BTreeSet<PathBuf> = tracks
+        .iter()
+        .map(|t| t.dir().to_path_buf())
+        .filter(|dir| !root.is_dir() || dir.starts_with(root))
+        .collect();
     // Directories with no tracks in them count: a folder you just made has to
     // show up, or there is nowhere to move anything into.
     for entry in WalkDir::new(root)

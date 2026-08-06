@@ -1,5 +1,7 @@
 # vibox
 
+> **Canonical:** [gitlab.com/safteinzz/vibox](https://gitlab.com/safteinzz/vibox) · **Mirror:** [github.com/safteinzz/vibox](https://github.com/safteinzz/vibox)
+
 **A jukebox you exit with `:q`**
 
 A cli music player with vi motions, ex commands, and tmux manners. Your library

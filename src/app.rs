@@ -444,6 +444,17 @@ impl App {
         self.clamp();
     }
 
+    /// True for tracks that belong to the library itself.
+    ///
+    /// A playlist may name files anywhere on disk, and those are read in so it
+    /// can play them, but they are not part of the library: `everything` and
+    /// the folder list must not grow a stray directory because a playlist
+    /// mentioned one.
+    fn in_library(&self, path: &Path) -> bool {
+        // With an m3u opened as the root, its tracks are the library.
+        !self.root.is_dir() || path.starts_with(&self.root)
+    }
+
     /// Recomputes the visible track list from the playlist or the folder.
     pub fn rebuild_view(&mut self) {
         if self.playlist_view.is_some() {
@@ -454,7 +465,9 @@ impl App {
         // A marked deletion is gone from the list straight away: this is a
         // buffer, so it should look like the edit already happened.
         self.view = match self.folder_open {
-            0 => (0..self.tracks.len()).collect(),
+            0 => (0..self.tracks.len())
+                .filter(|&t| self.in_library(&self.tracks[t].path))
+                .collect(),
             i => {
                 let dir = self.folders[i - 1].1.clone();
                 (0..self.tracks.len())
@@ -2748,6 +2761,42 @@ mod tests {
         assert!(dir.path().join("a.mp3").exists());
         assert!(dir.path().join("b.mp3").exists());
         assert_eq!(app.tracks.len(), 3, "the cut track is back in the list");
+    }
+
+    #[test]
+    fn a_playlist_of_outside_tracks_never_joins_the_library() {
+        let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
+
+        // a playlist naming a file that lives outside the library root
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("HOLA/far.mp3");
+        std::fs::create_dir_all(far.parent().unwrap()).unwrap();
+        std::fs::write(&far, b"").unwrap();
+        let m3u = app.playlists_dir.clone().unwrap().join("test.m3u");
+        std::fs::create_dir_all(m3u.parent().unwrap()).unwrap();
+        std::fs::write(&m3u, format!("#EXTM3U\n{}\n", far.display())).unwrap();
+        app.reload_playlists();
+
+        app.tab = Tab::Playlists;
+        app.pl_cur = 0;
+        app.open_playlist();
+        assert_eq!(app.view.len(), 1, "the playlist shows its track");
+
+        // back to everything, exactly as pressing gt and enter does
+        app.tab = Tab::Folders;
+        app.folder_cur = 0;
+        app.open_folder();
+
+        assert_eq!(
+            app.view.len(),
+            2,
+            "everything is the library, not the library plus a playlist's strays"
+        );
+        assert!(
+            !app.folders.iter().any(|(label, _)| label.contains("HOLA")),
+            "a folder outside the root has no business in the folder list"
+        );
+        assert!(dir.path().join("a.mp3").exists());
     }
 
     #[test]
