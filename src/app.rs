@@ -275,6 +275,8 @@ pub struct App {
     /// Playback order, snapshotted from the view when playback starts.
     pub queue: Vec<usize>,
     pub qpos: usize,
+    /// Queue positions already played, so shuffle can go back the way it came.
+    history: Vec<usize>,
     pub playing: Option<usize>,
     pub repeat: Repeat,
     pub shuffle: bool,
@@ -286,6 +288,8 @@ pub struct App {
     /// Where the real terminal cursor goes while inserting, set by the renderer.
     pub cursor_screen: Option<(u16, u16)>,
     pub show_info: bool,
+    /// How far `:changes` is panned sideways, in cells.
+    pub changes_pan: usize,
     pub show_changes: bool,
     pub show_help: bool,
     pub help_scroll: usize,
@@ -353,6 +357,7 @@ impl App {
             playlists_dir: None,
             queue: Vec::new(),
             qpos: 0,
+            history: Vec::new(),
             playing: None,
             repeat: Repeat::Off,
             shuffle: false,
@@ -361,6 +366,7 @@ impl App {
             msg: None,
             cursor_screen: None,
             show_info: false,
+            changes_pan: 0,
             show_changes: false,
             show_help: false,
             help_scroll: 0,
@@ -1382,6 +1388,8 @@ impl App {
     }
 
     /// What `:w` would do right now, one line each, for `:changes`.
+    ///
+    /// Every line starts with its verb, which is also what colours it.
     pub fn pending_changes(&self) -> Vec<String> {
         let mut out = Vec::new();
         // Every rename, wherever it was typed, reads the same way.
@@ -1884,6 +1892,40 @@ impl App {
         }
     }
 
+    /// `:e!`: throws away everything waiting for a `:w`.
+    ///
+    /// All of it, not just the name being typed: the point of the command is
+    /// that `[+]` goes out and `:changes` comes back empty.
+    pub fn discard_changes(&mut self) {
+        let had = self.unsaved();
+        self.end_edit();
+        self.renames.clear();
+        self.doomed.clear();
+        self.doomed_files.clear();
+        self.doomed_dirs.clear();
+        self.cut.clear();
+        self.moves.clear();
+        self.copies.clear();
+        self.playlist_dirty = false;
+        for tab in &mut self.tabs {
+            tab.dirty = false;
+        }
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+
+        // The list is showing cuts and moves that are no longer going to
+        // happen, so it has to be rebuilt from the library as it stands.
+        if let Err(e) = self.reload() {
+            self.error(format!("{e}"));
+            return;
+        }
+        self.reload_playlists();
+
+        if had {
+            self.info("changes thrown away");
+        }
+    }
+
     /// Renames every changed file. Names are checked first, so a bad one stops
     /// the whole write instead of leaving the batch half applied.
     pub fn apply_edits(&mut self) {
@@ -2052,6 +2094,7 @@ impl App {
         }
         self.queue = self.view.clone();
         self.qpos = self.cur;
+        self.history.clear();
         self.play_queue_pos();
     }
 
@@ -2104,8 +2147,19 @@ impl App {
             self.play_queue_pos();
             return;
         }
-        if self.shuffle && delta > 0 {
-            self.qpos = self.next_random();
+        // Shuffle keeps a history, because "previous" has to mean the track you
+        // just heard. Without it, going back walks the queue order instead, to
+        // a track that was never played.
+        if self.shuffle {
+            if delta > 0 {
+                self.history.push(self.qpos);
+                self.qpos = self.next_random();
+            } else if let Some(previous) = self.history.pop() {
+                self.qpos = previous;
+            } else {
+                self.info("nothing played before this");
+                return;
+            }
             self.play_queue_pos();
             self.follow_playing();
             return;
@@ -2635,6 +2689,65 @@ mod tests {
         assert!(dir.path().join("a.mp3").exists(), "its tracks are not");
         assert!(dir.path().join("b.mp3").exists());
         assert_eq!(app.tracks.len(), 2);
+    }
+
+    #[test]
+    fn shuffle_goes_back_to_what_was_actually_played() {
+        let (mut app, _dir) = library(&["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
+        app.shuffle = true;
+        app.queue = app.view.clone();
+        app.qpos = 0;
+        app.history.clear();
+
+        let mut heard = vec![app.qpos];
+        for _ in 0..3 {
+            app.advance(1, false);
+            heard.push(app.qpos);
+        }
+
+        // Walking back has to retrace those steps, not the queue order.
+        for expected in heard.iter().rev().skip(1) {
+            app.advance(-1, false);
+            assert_eq!(app.qpos, *expected);
+        }
+    }
+
+    #[test]
+    fn e_bang_throws_away_every_kind_of_pending_change() {
+        let (mut app, dir) = library(&["a.mp3", "b.mp3", "jazz/c.mp3"]);
+        app.danger = true;
+
+        // a rename, a cut file, and a playlist edit, all waiting
+        app.begin_edit();
+        set_name(&mut app, "renamed");
+        app.commit_name();
+
+        app.cur = 1;
+        app.cut_tracks();
+
+        app.mode = Mode::Visual;
+        app.visual_anchor = Some(0);
+        app.cur = 0;
+        app.yank_selection();
+        app.create_playlist("mix");
+        app.open_playlist();
+        app.paste_into_playlist();
+
+        assert!(app.unsaved());
+        assert!(!app.pending_changes().is_empty());
+
+        app.discard_changes();
+
+        assert!(!app.unsaved(), "nothing is waiting any more");
+        assert!(app.pending_changes().is_empty(), "`:changes` comes back empty");
+        assert!(app.renames.is_empty());
+        assert!(app.doomed_files.is_empty());
+        assert!(!app.playlist_dirty);
+
+        // and the disk was never touched by any of it
+        assert!(dir.path().join("a.mp3").exists());
+        assert!(dir.path().join("b.mp3").exists());
+        assert_eq!(app.tracks.len(), 3, "the cut track is back in the list");
     }
 
     #[test]

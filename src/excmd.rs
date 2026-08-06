@@ -64,10 +64,9 @@ pub fn run(app: &mut App, line: &str) {
             }
         }
         // `:e!` with pending renames is vim's "throw it away and reread".
-        "e" | "edit" | "cd" if cmd.bang && cmd.args.is_empty() && app.edit.is_some() => {
-            app.end_edit();
-            app.info("renames discarded");
-        }
+        // `:e!` is vim's "reread and lose my edits", so it drops everything
+        // waiting for a `:w`, not only the name being typed.
+        "e" | "edit" | "cd" if cmd.bang && cmd.args.is_empty() => app.discard_changes(),
         "e" | "edit" | "cd" => edit(app, cmd.args, cmd.bang),
         "pwd" => {
             let root = app.root.display().to_string();

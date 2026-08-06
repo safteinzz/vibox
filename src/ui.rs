@@ -81,7 +81,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_info(frame, app, frame.area());
     }
     if app.show_changes {
-        draw_changes(frame, app, frame.area());
+        let area = frame.area();
+        draw_changes(frame, app, area);
     }
     if app.show_help {
         draw_help(frame, app, frame.area());
@@ -142,19 +143,16 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// `:changes`: exactly what a `:w` would write, before you press it.
-fn draw_changes(frame: &mut Frame, app: &App, area: Rect) {
+///
+/// Two long paths and an arrow are wider than any popup, so the window pans
+/// sideways with `h` and `l`, and says so along the bottom when there is more
+/// to see.
+fn draw_changes(frame: &mut Frame, app: &mut App, area: Rect) {
     let changes = app.pending_changes();
-    let body: Vec<Line> = if changes.is_empty() {
-        vec![Line::styled(" nothing to write", dim())]
-    } else {
-        changes
-            .iter()
-            .map(|line| Line::raw(format!(" {line}")))
-            .collect()
-    };
+    let widest = changes.iter().map(|line| line.width()).max().unwrap_or(0);
 
-    let w = 76.min(area.width.saturating_sub(4));
-    let h = (body.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let w = 88.min(area.width.saturating_sub(4));
+    let h = (changes.len().max(1) as u16 + 2).min(area.height.saturating_sub(2));
     let popup = Rect {
         x: (area.width.saturating_sub(w)) / 2,
         y: (area.height.saturating_sub(h)) / 2,
@@ -164,9 +162,76 @@ fn draw_changes(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::bordered().title(" :w would do this, q closes ");
     let inner = block.inner(popup);
+    let view_w = inner.width as usize;
+    app.changes_pan = app.changes_pan.min(widest.saturating_sub(view_w));
+    let pan = app.changes_pan;
+
+    let body: Vec<Line> = if changes.is_empty() {
+        vec![Line::styled(" nothing to write", dim())]
+    } else {
+        changes
+            .iter()
+            .map(|line| {
+                let shown: String = line.chars().skip(pan).collect();
+                Line::styled(format!(" {shown}"), change_style(line))
+            })
+            .collect()
+    };
+
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
     frame.render_widget(Paragraph::new(body), inner);
+
+    if widest > view_w {
+        draw_hscrollbar(frame, popup, widest, pan, view_w);
+    }
+}
+
+/// Colour by what the line would do: green makes something, blue moves or
+/// renames it, red takes it away.
+fn change_style(line: &str) -> Style {
+    let colour = match line.split_whitespace().next() {
+        Some("save" | "copy") => Color::Green,
+        Some("rename" | "move") => Color::Blue,
+        Some("delete" | "DELETE") => Color::Red,
+        _ => Color::Reset,
+    };
+    Style::default().fg(colour)
+}
+
+/// A thumb along the bottom border showing how much is off to the sides.
+fn draw_hscrollbar(frame: &mut Frame, popup: Rect, total: usize, pan: usize, view: usize) {
+    let track = popup.width.saturating_sub(2) as usize;
+    if track == 0 || total == 0 {
+        return;
+    }
+
+    let thumb = (track * view / total).max(1).min(track);
+    let at = if total > view {
+        (track - thumb) * pan / (total - view)
+    } else {
+        0
+    };
+
+    let mut bar = String::new();
+    for cell in 0..track {
+        bar.push(if cell >= at && cell < at + thumb {
+            '━'
+        } else {
+            '─'
+        });
+    }
+
+    let row = Rect {
+        x: popup.x + 1,
+        y: popup.y + popup.height.saturating_sub(1),
+        width: track as u16,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(Line::styled(bar, Style::default().fg(Color::Cyan))),
+        row,
+    );
 }
 
 /// Wraps one lyric at the pane width, indenting the runover so a long line
@@ -999,7 +1064,7 @@ const HELP: &[HelpSection] = &[
             ("dd then p", "move a track: cut it, put it where it should go"),
             ("o", "new playlist or folder, by name"),
             ("u, ctrl-r", "undo, redo anything still waiting"),
-            (":ch", "list exactly what `:w` would do"),
+            (":ch", "list exactly what `:w` would do; h and l pan it"),
             (":w", "do all of it; `:w mix` saves the view as a playlist"),
             (":e!", "throw away what is waiting"),
         ],

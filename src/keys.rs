@@ -13,10 +13,64 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // A window that is up owns the keyboard, whatever mode opened it. `:ch`
+    // from inside a rename used to draw the popup while h and l still edited
+    // the name behind it.
+    if app.show_info || app.show_changes || app.show_help {
+        window_key(app, key);
+        return;
+    }
+
     match app.mode {
         Mode::Command | Mode::Search => line_mode(app, key),
         Mode::Edit | Mode::EditInsert => edit_mode(app, key),
         Mode::Normal | Mode::Visual => normal_mode(app, key),
+    }
+}
+
+/// Keys for whichever window is open: info, changes, or help.
+fn window_key(app: &mut App, key: KeyEvent) {
+    // The info window takes the keyboard while it is up.
+    if app.show_info {
+        match key.code {
+            KeyCode::Char('y') => {
+                let path = app.current_track().map(|t| t.path.display().to_string());
+                if let Some(path) = path {
+                    app.copy_to_clipboard(&path);
+                }
+                app.show_info = false;
+            }
+            KeyCode::Char('q' | 'Q' | 'K') | KeyCode::Esc | KeyCode::Enter => {
+                app.show_info = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // The changes window pans sideways: a rename of two long paths is wider
+    // than any popup, and the interesting part is usually the far end.
+    if app.show_changes {
+        let step = app.count.take().unwrap_or(1) * 4;
+        match key.code {
+            KeyCode::Char('l') | KeyCode::Right => app.changes_pan += step,
+            KeyCode::Char('h') | KeyCode::Left => {
+                app.changes_pan = app.changes_pan.saturating_sub(step);
+            }
+            KeyCode::Char('0') => app.changes_pan = 0,
+            KeyCode::Char('$') => app.changes_pan = usize::MAX,
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter => {
+                app.show_changes = false;
+                app.changes_pan = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // The help window takes the keyboard while it is up, like a help buffer.
+    if app.show_help {
+        help_key(app, key);
     }
 }
 
@@ -295,40 +349,6 @@ fn leave_line(app: &mut App) {
 
 #[allow(clippy::too_many_lines)] // it is a keymap: one arm per key reads better flat
 fn normal_mode(app: &mut App, key: KeyEvent) {
-    // The info window takes the keyboard while it is up.
-    if app.show_info {
-        match key.code {
-            KeyCode::Char('y') => {
-                let path = app.current_track().map(|t| t.path.display().to_string());
-                if let Some(path) = path {
-                    app.copy_to_clipboard(&path);
-                }
-                app.show_info = false;
-            }
-            KeyCode::Char('q' | 'Q' | 'K') | KeyCode::Esc | KeyCode::Enter => {
-                app.show_info = false;
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    if app.show_changes {
-        if matches!(
-            key.code,
-            KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter
-        ) {
-            app.show_changes = false;
-        }
-        return;
-    }
-
-    // The help window takes the keyboard while it is up, like a help buffer.
-    if app.show_help {
-        help_key(app, key);
-        return;
-    }
-
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let count = app.count.unwrap_or(1);
     let has_count = app.count.is_some();

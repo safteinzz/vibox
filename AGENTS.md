@@ -24,6 +24,9 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 - `TODO-LIST.md` (gitignored) holds one-line ideas; delete the line when the idea ships.
 
 ## Invariants and gotchas
+- **An open window owns the keyboard.** `keys::handle` checks `show_info`, `show_changes` and `show_help` before it dispatches on mode, or a popup opened from inside a rename leaves its keys editing the name behind it.
+- **`:e!` clears the whole pending set**, not just the buffer being typed, and rescans afterwards so rows hidden by a cut come back. `App::discard_changes` is the one place that has to know every pending field.
+- **When trusting lyric timings:** the duration on an lrclib entry can be corrected while its timestamps still come from another recording, so `lyrics::runs_over` also rejects lyrics whose last line falls past the end of the track.
 - **Nothing reaches the disk until `:w`.** Renames, playlist edits and playlist deletions all sit in memory, `App::unsaved` drives the `[+]` marker, `:changes` lists them and `App::write_all` applies them together. A new mutation must join that path rather than acting immediately.
 - **`gt` and `gT` act on the focused pane:** the sidebar flips `folders | playlists`, the track pane walks the open view tabs. `h` and `l` are seek keys and must stay that way, which is why tabs never took them.
 - **A playlist is a view over the library, not a new root.** `App::open_playlist` fills `playlist_rows` and leaves `root`, `tracks` and the folders tab alone, so a rewrite that reopens the root on every playlist would break browsing while one is open.

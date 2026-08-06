@@ -17,7 +17,7 @@ use crate::library::Track;
 /// Stamped on every cache entry. Bump it when what gets cached changes
 /// meaning: entries without the current marker are refetched rather than
 /// trusted, since an old one cannot say whether its timings were believed.
-const CACHE_MARK: &str = "[vibox:1]";
+const CACHE_MARK: &str = "[vibox:2]";
 
 const AGENT: &str = concat!(
     "vibox/",
@@ -161,7 +161,7 @@ fn fetch(job: &Request) -> Lyrics {
         // its timestamps.
         Ok(body) => {
             let trust = gap(&body, job.duration) <= SYNC_TOLERANCE;
-            return from_json(&body, trust);
+            return from_json(&body, job.duration, trust);
         }
         // A miss on the exact match is normal: the duration or the album
         // rarely lines up with what someone else uploaded.
@@ -178,7 +178,7 @@ fn fetch(job: &Request) -> Lyrics {
         Ok(body) => match pick(&body, job.duration) {
             Some(hit) => {
                 let trust = gap(&hit, job.duration) <= SYNC_TOLERANCE;
-                from_json(&hit, trust)
+                from_json(&hit, job.duration, trust)
             }
             None => Lyrics::Missing("no lyrics on lrclib for this track".into()),
         },
@@ -190,6 +190,17 @@ fn fetch(job: &Request) -> Lyrics {
 /// How far a hit's duration may be from ours before its timestamps belong to
 /// another edit. Seconds of difference show up as seconds of lag.
 const SYNC_TOLERANCE: f64 = 2.0;
+
+/// True when the last line is timed past the end of the track, allowing a few
+/// seconds for a fade or a sloppy final timestamp.
+fn runs_over(lines: &[(Duration, String)], ours: u64) -> bool {
+    if ours == 0 {
+        return false;
+    }
+    lines
+        .last()
+        .is_some_and(|(at, _)| at.as_secs() > ours + 5)
+}
 
 /// Picks the hit closest in duration, which is the likeliest to be the same
 /// recording.
@@ -244,7 +255,7 @@ fn text_of(value: &serde_json::Value, key: &str) -> String {
 
 /// `trust_timing` false means the words are right but the timestamps belong to
 /// another release, so they are shown without a following highlight.
-fn from_json(body: &serde_json::Value, trust_timing: bool) -> Lyrics {
+fn from_json(body: &serde_json::Value, ours: u64, trust_timing: bool) -> Lyrics {
     if body
         .get("instrumental")
         .and_then(serde_json::Value::as_bool)
@@ -256,7 +267,10 @@ fn from_json(body: &serde_json::Value, trust_timing: bool) -> Lyrics {
     let synced = text_of(body, "syncedLyrics");
     if !synced.trim().is_empty() {
         return match parse(&synced) {
-            Lyrics::Synced(lines) if !trust_timing => {
+            // Lyrics that run past the end of the track are from a longer
+            // recording, whatever the entry claims its duration is: an lrclib
+            // entry can say 2:44 and carry timings out to 3:10.
+            Lyrics::Synced(lines) if !trust_timing || runs_over(&lines, ours) => {
                 Lyrics::Plain(lines.into_iter().map(|(_, words)| words).collect())
             }
             other => other,
@@ -385,4 +399,51 @@ fn encode(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timed(seconds: &[u64]) -> Vec<(Duration, String)> {
+        seconds
+            .iter()
+            .map(|s| (Duration::from_secs(*s), format!("line at {s}")))
+            .collect()
+    }
+
+    /// The case this rule exists for: an lrclib entry claiming 2:44 whose
+    /// timings run to 3:10, because they came from the original recording.
+    #[test]
+    fn lyrics_timed_past_the_end_of_the_track_are_not_trusted() {
+        assert!(runs_over(&timed(&[14, 120, 190]), 164));
+    }
+
+    #[test]
+    fn a_last_line_inside_the_track_is_fine() {
+        assert!(!runs_over(&timed(&[14, 120, 160]), 164));
+    }
+
+    #[test]
+    fn a_few_seconds_over_is_allowed_for_a_fade() {
+        assert!(!runs_over(&timed(&[160, 166]), 164));
+    }
+
+    #[test]
+    fn an_unknown_duration_never_rejects_anything() {
+        assert!(!runs_over(&timed(&[190]), 0));
+    }
+
+    #[test]
+    fn lrc_timestamps_parse_to_their_offsets() {
+        let (lyrics, offset) = parse_with_offset("[offset:250]\n[01:30.50] words\n");
+        assert_eq!(offset, 250);
+        match lyrics {
+            Lyrics::Synced(lines) => {
+                assert_eq!(lines[0].0, Duration::from_secs_f64(90.5));
+                assert_eq!(lines[0].1, "words");
+            }
+            _ => panic!("timestamped lines are synced lyrics"),
+        }
+    }
 }
