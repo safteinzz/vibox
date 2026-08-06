@@ -5,7 +5,7 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 
 ## Hard rules
 - **Commit, push, and publish only when the user says to ship.** They test interactively first; a mid-work commit is never the deliverable.
-- Release flow, in this exact order: `cargo clippy` warning-clean (+ `cargo test` if a suite exists) → bump `version` in `Cargo.toml` → one commit (short conventional message, never co-authored) → `git push origin main` → `cargo publish` (dry-run first; publishing is irreversible) → **tag only after publish succeeds**: `git tag vX.Y.Z && git push origin --tags`. A tag must never point at a version that failed to publish.
+- Release flow, in this exact order: bump `version` in `Cargo.toml` **first** → `cargo clippy --release --all-targets` warning-clean + `cargo test` green, which is also what refreshes `Cargo.lock` with the new version → one commit (short conventional message, never co-authored) → `git push origin main` → `cargo publish` (dry-run first; publishing is irreversible) → **tag only after publish succeeds**: `git tag vX.Y.Z && git push origin --tags`. A tag must never point at a version that failed to publish.
 - Commit messages: short conventional tags (`feat:`, `fix:`, ...). **Never** add a `Co-Authored-By` trailer.
 - **No em-dashes** anywhere user-facing (README, --help, crate description, commit messages, prose) - they read as AI-generated text.
 - **Never add a dependency that needs a C library, system headers, or an external binary.** `cargo install vibox` must succeed on a bare toolchain; a build that fails on a missing header is a broken product. This is why the audio output is written against the pulseaudio wire protocol instead of using cpal.
