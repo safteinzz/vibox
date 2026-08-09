@@ -113,11 +113,33 @@ fn read_track(path: &Path) -> Track {
     track
 }
 
+/// How far along a scan is. A cold or large library takes seconds to walk and
+/// tag, and the caller is the only one that knows where to say so.
+#[derive(Clone, Copy, Debug)]
+pub enum Scan {
+    /// Walking the tree: audio files found so far. The total is not known yet.
+    Walking(usize),
+    /// Reading tags: files done, files found.
+    Reading(usize, usize),
+}
+
+/// Where a scan reports its progress. Called from the scan's worker threads,
+/// so a sink that prints has to serialise itself.
+pub type Report<'a> = &'a (dyn Fn(Scan) + Sync);
+
+/// A scan nobody is watching.
+pub const QUIET: Report<'static> = &|_| {};
+
 /// Walks `root` and reads every audio file under it.
 ///
 /// Symlinks are not followed: a music tree with a loop in it should not hang
 /// the player. Unreadable entries are skipped rather than failing the scan.
 pub fn scan(root: &Path) -> Result<Vec<Track>> {
+    scan_reporting(root, QUIET)
+}
+
+/// `scan`, saying how far along it is as it goes.
+pub fn scan_reporting(root: &Path, on: Report) -> Result<Vec<Track>> {
     if !root.exists() {
         bail!("no such path: `{}`", root.display());
     }
@@ -131,7 +153,8 @@ pub fn scan(root: &Path) -> Result<Vec<Track>> {
     } else if root.is_file() {
         vec![root.to_path_buf()]
     } else {
-        WalkDir::new(root)
+        let mut found = Vec::new();
+        for entry in WalkDir::new(root)
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| e.depth() == 0 || !hidden(e))
@@ -139,10 +162,24 @@ pub fn scan(root: &Path) -> Result<Vec<Track>> {
             .filter(|e| e.file_type().is_file())
             .map(walkdir::DirEntry::into_path)
             .filter(|p| is_audio(p))
-            .collect()
+        {
+            found.push(entry);
+            on(Scan::Walking(found.len()));
+        }
+        found
     };
 
-    let mut tracks: Vec<Track> = paths.par_iter().map(|p| read_track(p)).collect();
+    let total = paths.len();
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let mut tracks: Vec<Track> = paths
+        .par_iter()
+        .map(|p| {
+            let track = read_track(p);
+            let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            on(Scan::Reading(n, total));
+            track
+        })
+        .collect();
     // A playlist already has an order; a directory tree does not.
     if !is_playlist(root) {
         sort(&mut tracks, SortKey::Path);

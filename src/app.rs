@@ -298,7 +298,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(root: PathBuf, sort_key: SortKey) -> Result<App> {
+    pub fn new(root: PathBuf, sort_key: SortKey, on: library::Report) -> Result<App> {
         let (audio, audio_err) = match Audio::new() {
             Ok(a) => (Some(a), None),
             Err(e) => (None, Some(format!("{e}"))),
@@ -375,7 +375,7 @@ impl App {
         };
 
         app.reload_playlists();
-        app.reload()?;
+        app.reload_reporting(on)?;
         app.tabs.push(app.snapshot());
         if let Some(e) = audio_err {
             app.error(e);
@@ -388,9 +388,15 @@ impl App {
     /// Rescans the root from disk, keeping the cursor on the same track if it
     /// survived the rescan.
     pub fn reload(&mut self) -> Result<()> {
+        self.reload_reporting(library::QUIET)
+    }
+
+    /// `reload`, saying how far along the scan is. Only the first one, before
+    /// the terminal is taken over, has anywhere to say it.
+    pub fn reload_reporting(&mut self, on: library::Report) -> Result<()> {
         let under_cursor = self.current_track().map(|t| t.path.clone());
 
-        self.tracks = library::scan(&self.root)?;
+        self.tracks = library::scan_reporting(&self.root, on)?;
         // `path` order means "the order the files came in", which for a
         // playlist is the order it was written, so leave that one alone.
         if !(library::is_playlist(&self.root) && self.sort_key == SortKey::Path) {
@@ -2404,7 +2410,7 @@ mod tests {
             std::fs::write(path, b"").unwrap();
         }
 
-        let mut app = App::new(dir.path().to_path_buf(), SortKey::Path).unwrap();
+        let mut app = App::new(dir.path().to_path_buf(), SortKey::Path, library::QUIET).unwrap();
         app.playlists_dir = Some(dir.path().join(".playlists"));
         app.reload_playlists();
         (app, dir)
