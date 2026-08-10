@@ -441,6 +441,27 @@ fn normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('y') if ctrl => scroll_view(app, -(count as isize)),
 
         // ---- search ------------------------------------------------------
+        // vim's `*` and `#`: the thing under the cursor becomes the search.
+        // Here that is the artist, since "what else do I have by them" is the
+        // question you ask while browsing.
+        KeyCode::Char(c @ ('*' | '#')) if app.focus == Pane::Tracks => {
+            let artist = app
+                .current_track()
+                .map(|t| t.artist.trim().to_string())
+                .unwrap_or_default();
+            if artist.is_empty() {
+                app.error("no artist on this track");
+            } else {
+                let back = c == '#';
+                app.last_search = artist.clone();
+                app.search_back = back;
+                if app.search(&artist, back, app.cur) {
+                    app.info(format!("searching `{artist}`, `n` for the next one"));
+                } else {
+                    app.error(format!("pattern not found: {artist}"));
+                }
+            }
+        }
         KeyCode::Char('n' | 'N') => {
             let back = app.search_back ^ (key.code == KeyCode::Char('N'));
             let pattern = app.last_search.clone();

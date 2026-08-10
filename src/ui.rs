@@ -1036,6 +1036,7 @@ const HELP: &[HelpSection] = &[
             ("gp", "jump to whatever is playing"),
             ("K", "what vibox knows about this track; y copies its path"),
             ("/ ?, n N", "search files, artists and albums, then repeat it"),
+            ("* #", "next, previous track by the artist under the cursor"),
         ],
     ),
     (

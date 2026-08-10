@@ -110,6 +110,7 @@ thirty seconds.
 | `r` `s` | repeat off/all/one, shuffle |
 | `c` | edit filenames in place, `:w` renames them |
 | `/` `?` `n` `N` | search filenames, artists, albums |
+| `*` `#` | next, previous track by the artist under the cursor |
 | `gt` `gT` `t` | switch tabs in the focused pane, open one in a new tab |
 | `gp` `K` | jump to whatever is playing, show track info |
 | `tab` `ctrl-w h/l` | switch pane |
