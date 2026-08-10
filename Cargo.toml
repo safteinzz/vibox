@@ -12,7 +12,7 @@ readme = "README.md"
 keywords = ["music", "player", "tui", "vim", "modal"]
 categories = ["command-line-utilities", "multimedia::audio"]
 # working files that are not part of the crate
-exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/"]
+exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/", "readme-assets/"]
 
 [dependencies]
 anyhow = "1"                                    # error plumbing, context on every failure the user can act on
