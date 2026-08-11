@@ -337,8 +337,13 @@ fn mkrc(app: &mut App, bang: bool) {
         .unwrap_or_else(|| app.root.clone())
         .display()
         .to_string();
+    // `:mkrc` is typed on purpose, so danger asked for here gets written. The
+    // session state still leaves it out: that one is automatic, and danger
+    // coming back without anyone asking is the failure this option must not
+    // have.
+    let danger = if app.danger { "set danger\n" } else { "" };
     let body = format!(
-        "\" written by :mkrc\nset root={music}\nset {}\n",
+        "\" written by :mkrc\nset root={music}\nset {}\n{danger}",
         saved_options(app)
     );
     let wrote = path
@@ -349,7 +354,12 @@ fn mkrc(app: &mut App, bang: bool) {
     match wrote {
         Ok(()) => {
             let shown = path.display().to_string();
-            app.info(format!("wrote {shown}"));
+            // Never let danger be written quietly, even when it was asked for.
+            if app.danger {
+                app.info(format!("wrote {shown}, danger included: it is on every launch now"));
+            } else {
+                app.info(format!("wrote {shown}"));
+            }
         }
         Err(e) => {
             let shown = path.display();
@@ -379,9 +389,10 @@ fn set_option(app: &mut App, name: &str, on: bool) {
     }
 }
 
-/// The options written to disk. `danger` is deliberately absent: it must be
-/// turned on for the session you want it in, or typed into the rc file by hand.
-/// Persisting it silently is how it ends up on when nobody meant it to be.
+/// The options shared by `:mkrc` and the session state. `danger` is absent on
+/// purpose: `:mkrc` adds it separately because it was typed, while the session
+/// state must never carry it, since an option that comes back on its own is how
+/// it ends up on when nobody meant it to be.
 fn saved_options(app: &App) -> String {
     OPTIONS
         .iter()

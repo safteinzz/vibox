@@ -1078,6 +1078,7 @@ const HELP: &[HelpSection] = &[
             ("d then p", "put them somewhere else instead: a move, like vim"),
             ("y then p", "copy them into another folder"),
             (":mkdir jazz", "a new folder under the library root"),
+            (":mkrc", "keeps danger on for good, if it is on when you write it"),
         ],
     ),
     (

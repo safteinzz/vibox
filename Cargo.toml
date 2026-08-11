@@ -1,6 +1,6 @@
 [package]
 name = "vibox"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 # let chains and the 2024 edition; an older toolchain fails with parse errors
 # instead of a clear message without this.

@@ -2,18 +2,14 @@
 
 > **Canonical:** [gitlab.com/safteinzz/vibox](https://gitlab.com/safteinzz/vibox) · **Mirror:** [github.com/safteinzz/vibox](https://github.com/safteinzz/vibox)
 
-**A jukebox you exit with `:q`**
+**A jukebox you exit with `:q`** 🎧
 
 A cli music player with vi motions, ex commands, and tmux manners. Your library
 is a directory, a track is a file, and the last line of the screen is the
 command line. There is no database and no import step: point it at a folder and
 it plays.
 
-**vibox does not touch your files.** It plays them, organizes them into
-playlists, and renames them when you ask. If you want it to move, copy and
-delete as well, that is `:set danger`, off by default and never saved for you.
-Either way nothing reaches the disk until you write it: `:changes` shows what a
-`:w` would do, `u` takes it back, and a force quit loses the lot on purpose.
+> Moving or deleting the files themselves takes `:set danger`.
 
 ## Install
 
@@ -87,9 +83,10 @@ with no highlight. Off by default, cached on disk.
 
 `:set danger` lets vibox change your library, and nothing else does. With it on,
 `dd` cuts tracks or a whole folder, `d` then `p` puts them in another folder as
-a move, `y` then `p` copies them, and `:mkdir jazz` makes a folder. It is off
-every time vibox starts, is never written by `:mkrc`, and has to be typed into
-`~/.config/vibox/viboxrc` by hand to be there for you.
+a move, `y` then `p` copies them, and `:mkdir jazz` makes a folder. It starts
+off every time unless you kept it: `:mkrc` writes it to
+`~/.config/vibox/viboxrc` when it is on, and tells you it did. Nothing else
+persists it, so it never turns itself on behind your back.
 
 A cut is an edit, not an action: the rows leave the list at once, `:changes`
 lists every one, and only `:w` writes. Cut something and never put it back and
@@ -125,7 +122,7 @@ of tmux's way.
 :e <path>       open a directory or an m3u for this session
 :set root=~/Music   the library vibox opens on its own
 :set lyrics     lyrics pane; :set noartist hides a column, :set artist! flips it
-:set danger     let vibox move, copy and delete; off every start, never saved
+:set danger     let vibox move, copy and delete; off every start, `:mkrc` keeps it
 :sort artist    path, title, artist, album, duration
 :vol 70         :seek 1:30, :reload, :42 jumps to row 42
 :changes        what :w would do        :w writes it, :e! discards it
