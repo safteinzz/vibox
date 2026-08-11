@@ -76,8 +76,12 @@ being sung.
 ![The interface with a third pane on the right showing song lyrics, the line currently being sung highlighted in bold](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/lyrics.png)
 
 It only follows when lrclib's recording matches yours within a couple of seconds,
-because timings from a different edit would drift; otherwise you get the words
-with no highlight. Off by default, cached on disk.
+because timings from a different edit would drift, and a hit whose artist and
+title do not match your tags is thrown out before that, since lrclib's search
+answers on substrings. Otherwise you get the words with no highlight.
+`:set nokaraoke` turns the following off for good, and `:clearcache`
+refetches everything if a track picked up the wrong words. Off by default,
+cached on disk.
 
 ## Danger mode
 
@@ -126,6 +130,8 @@ of tmux's way.
 :sort artist    path, title, artist, album, duration
 :vol 70         :seek 1:30, :reload, :42 jumps to row 42
 :changes        what :w would do        :w writes it, :e! discards it
+:history        every track played this session, in order, j and k scroll
+:clearcache     drop every cached lyric so they are fetched again
 :mkrc           save your options to ~/.config/vibox/viboxrc
 :q  :q!         close the tab, or leave without writing
 ```

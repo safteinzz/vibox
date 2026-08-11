@@ -17,7 +17,11 @@ use crate::library::Track;
 /// Stamped on every cache entry. Bump it when what gets cached changes
 /// meaning: entries without the current marker are refetched rather than
 /// trusted, since an old one cannot say whether its timings were believed.
-const CACHE_MARK: &str = "[vibox:2]";
+const CACHE_MARK: &str = "[vibox:3]";
+
+/// Who the words came from, for the pane to credit. One provider today; when
+/// there are two this moves onto `Lyrics` so each result carries its own.
+pub const SOURCE: &str = "lrclib";
 
 const AGENT: &str = concat!(
     "vibox/",
@@ -136,6 +140,35 @@ impl Fetcher {
     pub fn is_loading(&self, path: &Path) -> bool {
         self.inflight.contains(path)
     }
+
+    /// Throws away every cached lyric, on disk and in memory, so the next play
+    /// of each track asks lrclib again.
+    ///
+    /// Only `.lrc` files directly inside the cache directory are removed, and
+    /// nothing else in the data directory is touched. Returns how many went.
+    pub fn clear(&mut self) -> std::io::Result<usize> {
+        self.cache.clear();
+        self.offsets.clear();
+
+        let Some(dir) = cache_dir() else {
+            return Ok(0);
+        };
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // Never fetched anything yet: nothing to clear is not a failure.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e),
+        };
+
+        let mut gone = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "lrc") && std::fs::remove_file(&path).is_ok() {
+                gone += 1;
+            }
+        }
+        Ok(gone)
+    }
 }
 
 impl Default for Fetcher {
@@ -175,7 +208,7 @@ fn fetch(job: &Request) -> Lyrics {
         encode(&job.title)
     );
     match get_json(&search) {
-        Ok(body) => match pick(&body, job.duration) {
+        Ok(body) => match pick(&body, job) {
             Some(hit) => {
                 let trust = gap(&hit, job.duration) <= SYNC_TOLERANCE;
                 from_json(&hit, job.duration, trust)
@@ -202,14 +235,82 @@ fn runs_over(lines: &[(Duration, String)], ours: u64) -> bool {
         .is_some_and(|(at, _)| at.as_secs() > ours + 5)
 }
 
-/// Picks the hit closest in duration, which is the likeliest to be the same
-/// recording.
-fn pick(body: &serde_json::Value, ours: u64) -> Option<serde_json::Value> {
+/// How far a hit's artist or title may be from ours, as a share of the longer
+/// of the two. A remaster suffix or a stray accent stays under it; a different
+/// song does not.
+const NAME_TOLERANCE: f64 = 0.3;
+
+/// Picks the hit closest in duration, out of the ones that are actually this
+/// song.
+///
+/// lrclib's search is a substring match on both fields, so asking for `Wax` and
+/// `Destiny` also answers with `Nightmares on Wax - Date With Destiny`. Ranking
+/// those on duration alone picks whichever wrong song happens to run about as
+/// long as ours, which is how a confidently wrong lyric sheet gets synced to a
+/// track. The name has to agree before the duration is worth consulting.
+fn pick(body: &serde_json::Value, job: &Request) -> Option<serde_json::Value> {
     let hits = body.as_array()?;
+    let ours = job.duration;
     hits.iter()
         .filter(|hit| has_lyrics(hit))
+        // An empty tag cannot disagree with anything, so it does not get a say.
+        .filter(|hit| job.artist.is_empty() || close(&text_of(hit, "artistName"), &job.artist))
+        .filter(|hit| job.title.is_empty() || close(&text_of(hit, "trackName"), &job.title))
         .min_by(|a, b| gap(a, ours).total_cmp(&gap(b, ours)))
         .cloned()
+}
+
+/// Two names for the same song, allowing for case, punctuation and whatever is
+/// in the brackets.
+fn close(theirs: &str, ours: &str) -> bool {
+    let (theirs, ours) = (normalize(theirs), normalize(ours));
+    if theirs.is_empty() || ours.is_empty() {
+        return false;
+    }
+    let longest = theirs.chars().count().max(ours.chars().count());
+    distance(&theirs, &ours) as f64 / longest as f64 <= NAME_TOLERANCE
+}
+
+/// Lowercase, without bracketed asides or punctuation: `Destiny (Original
+/// Version)` and `destiny` are the same title written twice.
+fn normalize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    let mut space = true;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            _ if c.is_alphanumeric() => {
+                out.extend(c.to_lowercase());
+                space = false;
+            }
+            _ if !space => {
+                out.push(' ');
+                space = true;
+            }
+            _ => {}
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Levenshtein distance, two rows at a time. Titles are short, so the naive
+/// version is free.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, ca) in a.chars().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
 }
 
 fn gap(hit: &serde_json::Value, ours: u64) -> f64 {
@@ -334,11 +435,15 @@ fn split_timestamp(line: &str) -> Option<(Duration, &str)> {
 
 // ---- disk cache ---------------------------------------------------------
 
+fn cache_dir() -> Option<PathBuf> {
+    Some(dirs::data_dir()?.join("vibox/lyrics"))
+}
+
 fn cache_path(track: &Path) -> Option<PathBuf> {
     let id = track.to_string_lossy().bytes().fold(0u64, |acc, b| {
         acc.wrapping_mul(31).wrapping_add(u64::from(b))
     });
-    Some(dirs::data_dir()?.join("vibox/lyrics").join(format!("{id:016x}.lrc")))
+    Some(cache_dir()?.join(format!("{id:016x}.lrc")))
 }
 
 /// An empty cache file means "asked lrclib, it has nothing", so a track with
@@ -404,6 +509,92 @@ fn encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One lrclib search result, as the fields `pick` reads them.
+    fn hit(artist: &str, track: &str, seconds: f64) -> serde_json::Value {
+        serde_json::json!({
+            "artistName": artist,
+            "trackName": track,
+            "duration": seconds,
+            "syncedLyrics": "[00:01.00] words",
+        })
+    }
+
+    /// The track we are asking about.
+    fn asking(artist: &str, title: &str, seconds: u64) -> Request {
+        Request {
+            path: PathBuf::from("/m/track.mp3"),
+            artist: artist.into(),
+            title: title.into(),
+            album: String::new(),
+            duration: seconds,
+        }
+    }
+
+    fn chosen(hits: &[serde_json::Value], job: &Request) -> Option<String> {
+        let body = serde_json::Value::Array(hits.to_vec());
+        pick(&body, job).map(|hit| text_of(&hit, "trackName"))
+    }
+
+    /// lrclib answers on substrings, so a search can come back entirely full of
+    /// other people's songs. Length alone cannot tell them apart.
+    #[test]
+    fn a_search_that_found_only_other_songs_picks_nothing() {
+        let hits = [
+            hit("Nightmares on Wax", "Date With Destiny", 308.0),
+            hit("Wax", "Call It Destiny", 243.0),
+        ];
+        assert_eq!(chosen(&hits, &asking("Wax", "Destiny", 306)), None);
+    }
+
+    #[test]
+    fn the_song_we_asked_for_beats_a_closer_running_time() {
+        let hits = [
+            hit("Nightmares on Wax", "Date With Destiny", 306.0),
+            hit("Wax", "Destiny", 280.0),
+        ];
+        assert_eq!(
+            chosen(&hits, &asking("Wax", "Destiny", 306)).as_deref(),
+            Some("Destiny")
+        );
+    }
+
+    #[test]
+    fn case_punctuation_and_whatever_is_in_the_brackets_do_not_matter() {
+        let hits = [hit("SFDK", "Despacito Pero Voy", 287.0)];
+        let job = asking("sfdk", "Despacito pero voy (Original Mix)", 288);
+        assert!(chosen(&hits, &job).is_some());
+    }
+
+    #[test]
+    fn the_closest_running_time_wins_among_the_ones_that_are_the_song() {
+        let hits = [
+            hit("ABBA", "The Day Before You Came", 360.0),
+            hit("ABBA", "The Day Before You Came", 349.0),
+            hit("ABBA", "The Day Before You Came", 320.0),
+        ];
+        let body = serde_json::Value::Array(hits.to_vec());
+        let got = pick(&body, &asking("ABBA", "The Day Before You Came", 350)).unwrap();
+        assert_eq!(got.get("duration").unwrap().as_f64(), Some(349.0));
+    }
+
+    #[test]
+    fn an_entry_with_no_words_in_it_is_never_the_answer() {
+        let empty = serde_json::json!({
+            "artistName": "ABBA",
+            "trackName": "Waterloo",
+            "duration": 166.0,
+        });
+        assert_eq!(chosen(&[empty], &asking("ABBA", "Waterloo", 166)), None);
+    }
+
+    /// A file with no artist tag still has a title to go on, and refusing every
+    /// hit because a tag is blank would leave it with nothing.
+    #[test]
+    fn a_tag_we_do_not_have_does_not_get_a_vote() {
+        let hits = [hit("Alphaville", "Forever Young", 227.0)];
+        assert!(chosen(&hits, &asking("", "Forever Young", 227)).is_some());
+    }
 
     fn timed(seconds: &[u64]) -> Vec<(Duration, String)> {
         seconds

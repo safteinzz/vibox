@@ -84,9 +84,64 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let area = frame.area();
         draw_changes(frame, app, area);
     }
+    if app.show_history {
+        let area = frame.area();
+        draw_history(frame, app, area);
+    }
     if app.show_help {
         draw_help(frame, app, frame.area());
     }
+}
+
+/// `:history`: what this session has played, oldest first.
+///
+/// Opens on the newest, because the question it answers is almost always "what
+/// was that one two songs ago", and shuffle is the reason you cannot just look
+/// at the list.
+fn draw_history(frame: &mut Frame, app: &mut App, area: Rect) {
+    let total = app.played.len();
+    let numbered: Vec<String> = app
+        .played
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!(" {:>4}  {line}", i + 1))
+        .collect();
+
+    let widest = numbered.iter().map(|l| l.chars().count()).max().unwrap_or(20) + 2;
+    let w = (widest as u16).clamp(24, area.width.saturating_sub(4));
+    let h = ((total as u16) + 2).min(area.height.saturating_sub(2));
+    let popup = Rect {
+        x: (area.width.saturating_sub(w)) / 2,
+        y: (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    };
+
+    let block = Block::bordered().title(format!(" played this session ({total}), q closes "));
+    let inner = block.inner(popup);
+    let rows = inner.height as usize;
+    app.history_top = app.history_top.min(total.saturating_sub(rows));
+    let top = app.history_top;
+
+    // The last line is what is playing now, so it gets the colour the playing
+    // row gets everywhere else.
+    let body: Vec<Line> = numbered
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(rows)
+        .map(|(i, line)| {
+            if i + 1 == total && app.playing.is_some() {
+                Line::styled(line.clone(), Style::default().fg(Color::Cyan))
+            } else {
+                Line::raw(line.clone())
+            }
+        })
+        .collect();
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(Paragraph::new(body), inner);
 }
 
 /// `K`: everything vibox knows about the track under the cursor.
@@ -288,6 +343,14 @@ fn lyric_lines(app: &App, width: usize, height: usize) -> Vec<Line<'static>> {
             .flat_map(|l| wrap_lyric(l, width))
             .map(Line::raw)
             .collect(),
+        // `:set nokaraoke`: read them as words on a page. Timings that
+        // do not fit the recording are worse than no timings, and chasing the
+        // wrong line down the pane is the part that grates.
+        crate::lyrics::Lyrics::Synced(lines) if !app.karaoke => lines
+            .iter()
+            .flat_map(|(_, words)| wrap_lyric(words, width))
+            .map(Line::raw)
+            .collect(),
         crate::lyrics::Lyrics::Synced(lines) => {
             // The per file correction shifts every timestamp, for rips whose
             // lead-in differs from whoever uploaded the lyrics.
@@ -329,13 +392,50 @@ fn draw_lyrics(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(dim())
-        .title(" lyrics ");
+        .title(lyrics_title(app, area.width as usize));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
         Paragraph::new(lyric_lines(app, inner.width as usize, inner.height as usize)),
         inner,
     );
+}
+
+/// `lyrics (lrclib)`, crediting whoever wrote the words, and how to shift them
+/// when the timings sit a second out. The hint is dropped rather than clipped
+/// on a pane too narrow to hold it.
+fn lyrics_title(app: &App, width: usize) -> String {
+    let base = format!(" lyrics ({}) ", crate::lyrics::SOURCE);
+    let Some(hint) = sync_hint(app) else {
+        return base;
+    };
+    let full = format!("{base}{hint} ");
+    if full.chars().count() <= width {
+        full
+    } else {
+        base
+    }
+}
+
+/// `use [ ] to sync`, becoming the correction itself once there is one. Only
+/// for lyrics that are actually following: nudging a page of plain words does
+/// nothing, and neither does nudging with the following turned off.
+fn sync_hint(app: &App) -> Option<String> {
+    if !app.karaoke {
+        return None;
+    }
+    let track = app.playing_track()?;
+    match app.lyrics.get(&track.path)? {
+        crate::lyrics::Lyrics::Synced(_) => {
+            let offset = app.lyrics.offset(&track.path);
+            Some(if offset == 0 {
+                "use [ ] to sync".to_string()
+            } else {
+                format!("[ ] sync {:+.1}s", offset as f64 / 1000.0)
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Same content, for a terminal too narrow to give lyrics their own pane.
@@ -349,7 +449,10 @@ fn draw_lyrics_popup(frame: &mut Frame, app: &App, area: Rect) {
         height: h,
     };
 
-    let block = Block::bordered().title(" lyrics: :set nolyrics to close ");
+    let block = Block::bordered().title(format!(
+        " lyrics ({}): :set nolyrics to close ",
+        crate::lyrics::SOURCE
+    ));
     let inner = block.inner(popup);
     frame.render_widget(Clear, popup);
     frame.render_widget(block, popup);
@@ -1091,7 +1194,10 @@ const HELP: &[HelpSection] = &[
             (":set artist!", "flip a column: file, title, artist, album"),
             (":set lyrics", "lyrics for the playing track, from lrclib"),
             ("[ ]", "shift those lyrics earlier, later, kept per file"),
+            (":set nokaraoke", "the words, without them following the song"),
+            (":clearcache", "drop every cached lyric so they are fetched again"),
             (":vol 70, :seek 1:30", "volume and position"),
+            (":history", "every track played this session, newest last"),
             (":mkrc", "keep the options you have set"),
             (":42", "jump to row 42"),
         ],

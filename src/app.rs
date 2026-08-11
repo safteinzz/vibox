@@ -203,6 +203,10 @@ pub struct App {
     /// The library opened when vibox is started with no path, from `:set music=`.
     pub music: Option<PathBuf>,
     pub show_lyrics: bool,
+    /// Whether the lyrics pane follows the song. Off leaves the words still and
+    /// unstyled, which is what you want when lrclib's timings do not fit your
+    /// recording.
+    pub karaoke: bool,
     pub matrix: Matrix,
     pub lyrics: Fetcher,
     /// Directories that hold tracks. Index 0 of the pane is the whole library,
@@ -287,6 +291,14 @@ pub struct App {
     pub msg: Option<(String, bool)>,
     /// Where the real terminal cursor goes while inserting, set by the renderer.
     pub cursor_screen: Option<(u16, u16)>,
+    /// Everything played this session, oldest first, one line each. Repeats are
+    /// kept: playing a track twice happened twice. It is a log rather than a
+    /// list of indices, so a delete or a rename cannot make it point at the
+    /// wrong track later.
+    pub played: Vec<String>,
+    pub show_history: bool,
+    /// First line of the log on screen, clamped by the renderer.
+    pub history_top: usize,
     pub show_info: bool,
     /// How far `:changes` is panned sideways, in cells.
     pub changes_pan: usize,
@@ -311,6 +323,7 @@ impl App {
             columns: Columns::default(),
             music: None,
             show_lyrics: false,
+            karaoke: true,
             matrix: Matrix::default(),
             lyrics: Fetcher::new(),
             folders: Vec::new(),
@@ -365,6 +378,9 @@ impl App {
             mpris: mpris::start().ok(),
             msg: None,
             cursor_screen: None,
+            played: Vec::new(),
+            show_history: false,
+            history_top: 0,
             show_info: false,
             changes_pan: 0,
             show_changes: false,
@@ -2141,6 +2157,14 @@ impl App {
             Ok(()) => {
                 self.playing = Some(track_idx);
                 self.msg = None;
+                // The one place a track actually starts, so the one place the
+                // session log grows.
+                let track = &self.tracks[track_idx];
+                self.played.push(if track.artist.is_empty() {
+                    track.title.clone()
+                } else {
+                    format!("{} - {}", track.artist, track.title)
+                });
             }
             Err(e) => {
                 self.playing = None;
@@ -2414,6 +2438,48 @@ mod tests {
         app.playlists_dir = Some(dir.path().join(".playlists"));
         app.reload_playlists();
         (app, dir)
+    }
+
+    /// `:set` speaks vim's dialect, whatever the option is: bare turns on, `no`
+    /// turns off, `!` flips, and an unknown name is refused rather than
+    /// silently doing nothing.
+    #[test]
+    fn set_turns_options_on_off_and_over() {
+        let (mut app, _dir) = library(&["a.mp3"]);
+
+        crate::excmd::run(&mut app, "set nokaraoke");
+        assert!(!app.karaoke);
+        crate::excmd::run(&mut app, "set karaoke");
+        assert!(app.karaoke);
+        crate::excmd::run(&mut app, "set karaoke!");
+        assert!(!app.karaoke);
+
+        crate::excmd::run(&mut app, "set noartist");
+        assert!(!app.columns.get("artist").unwrap());
+
+        crate::excmd::run(&mut app, "set nonsense");
+        assert!(
+            app.msg.is_some(),
+            "an option vibox does not have has to say so"
+        );
+    }
+
+    /// The rule danger exists for: it is off on every start unless the rc file
+    /// asked for it, and quitting with it on must not be what asks.
+    #[test]
+    fn danger_is_never_on_because_a_previous_session_had_it_on() {
+        let (mut app, _dir) = library(&["a.mp3"]);
+        assert!(!app.danger, "off until it is asked for");
+
+        crate::excmd::run(&mut app, "set danger");
+        assert!(app.danger);
+
+        // What quitting writes down, and a new process reads back on the way in.
+        let restored = crate::excmd::saved_options(&app);
+        assert!(
+            !restored.contains("danger"),
+            "danger reached the saved session as `{restored}`"
+        );
     }
 
     #[test]

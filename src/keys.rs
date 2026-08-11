@@ -16,7 +16,7 @@ pub fn handle(app: &mut App, key: KeyEvent) {
     // A window that is up owns the keyboard, whatever mode opened it. `:ch`
     // from inside a rename used to draw the popup while h and l still edited
     // the name behind it.
-    if app.show_info || app.show_changes || app.show_help {
+    if app.show_info || app.show_changes || app.show_help || app.show_history {
         window_key(app, key);
         return;
     }
@@ -62,6 +62,24 @@ fn window_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter => {
                 app.show_changes = false;
                 app.changes_pan = 0;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // The history window scrolls, since a long session outgrows any popup.
+    if app.show_history {
+        let step = app.count.take().unwrap_or(1);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.history_top += step,
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.history_top = app.history_top.saturating_sub(step);
+            }
+            KeyCode::Char('g') | KeyCode::Home => app.history_top = 0,
+            KeyCode::Char('G') | KeyCode::End => app.history_top = usize::MAX,
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter => {
+                app.show_history = false;
             }
             _ => {}
         }

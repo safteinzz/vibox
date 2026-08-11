@@ -151,6 +151,22 @@ pub fn run(app: &mut App, line: &str) {
         },
         "set" | "se" => set(app, cmd.args),
         "mkrc" => mkrc(app, cmd.bang),
+        // No bang: everything in here can be fetched again, so the worst a
+        // stray `:clearcache` costs is one lookup per track.
+        "clearcache" | "clearc" => match app.lyrics.clear() {
+            Ok(0) => app.info("no cached lyrics to clear"),
+            Ok(n) => app.info(format!("cleared {n} cached lyrics, they refetch on play")),
+            Err(e) => app.error(format!("cannot clear the lyrics cache: {e}")),
+        },
+        "history" | "hist" => {
+            if app.played.is_empty() {
+                app.info("nothing played yet this session");
+            } else {
+                // Open on the newest, which is what you came to read.
+                app.history_top = usize::MAX;
+                app.show_history = true;
+            }
+        }
         "matrix" => {
             app.matrix.on = !app.matrix.on;
             let on = app.matrix.on;
@@ -369,11 +385,20 @@ fn mkrc(app: &mut App, bang: bool) {
 }
 
 /// Every `:set` option: the tag columns, plus the panes that can be turned off.
-const OPTIONS: [&str; 6] = ["file", "title", "artist", "album", "lyrics", "danger"];
+const OPTIONS: [&str; 7] = [
+    "file",
+    "title",
+    "artist",
+    "album",
+    "lyrics",
+    "karaoke",
+    "danger",
+];
 
 fn option(app: &App, name: &str) -> Option<bool> {
     match name {
         "lyrics" => Some(app.show_lyrics),
+        "karaoke" => Some(app.karaoke),
         "danger" => Some(app.danger),
         other => app.columns.get(other),
     }
@@ -382,6 +407,8 @@ fn option(app: &App, name: &str) -> Option<bool> {
 fn set_option(app: &mut App, name: &str, on: bool) {
     if name == "danger" {
         app.danger = on;
+    } else if name == "karaoke" {
+        app.karaoke = on;
     } else if name == "lyrics" {
         app.show_lyrics = on;
     } else {
@@ -393,7 +420,7 @@ fn set_option(app: &mut App, name: &str, on: bool) {
 /// purpose: `:mkrc` adds it separately because it was typed, while the session
 /// state must never carry it, since an option that comes back on its own is how
 /// it ends up on when nobody meant it to be.
-fn saved_options(app: &App) -> String {
+pub(crate) fn saved_options(app: &App) -> String {
     OPTIONS
         .iter()
         .filter(|name| **name != "danger")
