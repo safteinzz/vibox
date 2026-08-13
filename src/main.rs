@@ -39,7 +39,7 @@ const FRAME: Duration = Duration::from_millis(50);
 #[command(
     name = "vibox",
     version,
-    about = "a jukebox you exit with :q - a cli music player with vi motions, ex commands, and tmux manners",
+    about,
     after_help = "The library is just a directory. `:e <dir>` opens another one, `c` edits the\n\
                   filenames in it, and `:help` lists every key."
 )]

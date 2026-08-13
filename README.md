@@ -2,12 +2,9 @@
 
 > **Canonical:** [gitlab.com/safteinzz/vibox](https://gitlab.com/safteinzz/vibox) · **Mirror:** [github.com/safteinzz/vibox](https://github.com/safteinzz/vibox)
 
-**A jukebox you exit with `:q`** 🎧
-
-A cli music player with vi motions, ex commands, and tmux manners. Your library
-is a directory, a track is a file, and the last line of the screen is the
-command line. There is no database and no import step: point it at a folder and
-it plays.
+<!-- desc:start -->
+a jukebox you exit with :q - a cli music player with vi motions, ex commands, and tmux manners
+<!-- desc:end -->
 
 > Moving or deleting the files themselves takes `:set danger`.
 
@@ -148,8 +145,7 @@ anywhere, and so does `playerctl -p vibox play-pause`.
 
 ![The whole interface under a rain of falling green characters, the track list and lyrics still legible underneath](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/matrix.png)
 
-There is one command for this. It is not in the table above, it is not in
-`:help`, and you are not getting it from me.
+wake up
 
 ## License
 
