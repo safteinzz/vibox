@@ -564,7 +564,7 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
             break;
         }
         let label = if row == 0 {
-            format!("* everything ({})", app.tracks.len())
+            format!("* everything ({})", app.library_len())
         } else {
             app.folders[row - 1].0.clone()
         };

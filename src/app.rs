@@ -477,6 +477,18 @@ impl App {
         !self.root.is_dir() || path.starts_with(&self.root)
     }
 
+    /// How many tracks `everything` actually shows.
+    ///
+    /// Not `tracks.len()`: a playlist naming files from outside the library
+    /// reads them in so it can play them, and those sit in `tracks` without
+    /// ever being part of the library.
+    pub fn library_len(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|t| self.in_library(&t.path))
+            .count()
+    }
+
     /// Recomputes the visible track list from the playlist or the folder.
     pub fn rebuild_view(&mut self) {
         if self.playlist_view.is_some() {
