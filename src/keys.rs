@@ -186,6 +186,14 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
 
     // Keys that are about the pane rather than the name it is editing.
     match key.code {
+        // Esc drops a selection first, the way vim does, so it takes two of
+        // them to leave a name you were selecting inside.
+        KeyCode::Esc if app.name_selecting() => {
+            if let Some(buf) = app.name_buffer() {
+                buf.stop_visual();
+            }
+            return;
+        }
         // Leaving a name is not a write: it joins the pending set, like
         // marking a file does, and `:w` writes the lot.
         KeyCode::Esc => {
@@ -216,8 +224,11 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
             app.edit_next_row(-1);
             return;
         }
-        KeyCode::Char('c' | 'd') => {
-            app.pending = Some(if key.code == KeyCode::Char('c') { 'c' } else { 'd' });
+        // With a selection up these act on it instead of waiting for a motion,
+        // which is what makes `vw...d` work; without one they are operators
+        // and the next key is the motion, so `dw` and `yw` still read as vi.
+        KeyCode::Char(op @ ('c' | 'd' | 'y')) if !app.name_selecting() => {
+            app.pending = Some(op);
             return;
         }
         _ => {}
@@ -226,13 +237,19 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
     // Anything that changes the text is undoable on its own.
     if matches!(
         key.code,
-        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'x' | 'D' | 'C' | 'S') | KeyCode::Delete
+        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'x' | 'D' | 'C' | 'S' | 'c' | 'd' | 'p' | 'P')
+            | KeyCode::Delete
     ) {
         app.checkpoint();
     }
 
-    let insert = matches!(key.code, KeyCode::Char('i' | 'a' | 'I' | 'A' | 'C' | 'S'));
+    let insert = matches!(key.code, KeyCode::Char('i' | 'a' | 'I' | 'A' | 'C' | 'S' | 'c'));
+    let register = app.name_reg.clone();
     let Some(buf) = app.name_buffer() else { return };
+
+    // What this key took out of the name, if anything. A delete is a yank
+    // too, so whatever comes back lands in the register for `p`.
+    let mut taken = None;
 
     match key.code {
         KeyCode::Char('h') | KeyCode::Left => buf.left(),
@@ -242,14 +259,28 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('w') if !ctrl => buf.jump_word_forward(),
         KeyCode::Char('b') => buf.jump_word_back(),
         KeyCode::Char('e') => buf.jump_word_end(),
+        KeyCode::Char('v') => buf.toggle_visual(),
         KeyCode::Char('i') => {}
         KeyCode::Char('a') => buf.append_here(),
         KeyCode::Char('I') => buf.jump_start(),
         KeyCode::Char('A') => buf.append_at_end(),
-        KeyCode::Char('x') | KeyCode::Delete => buf.delete_here(),
-        KeyCode::Char('D' | 'C') => buf.truncate_here(),
-        KeyCode::Char('S') => buf.clear(),
+        KeyCode::Char('x') | KeyCode::Delete => taken = Some(buf.delete_here()),
+        KeyCode::Char('D') => taken = Some(buf.truncate_here()),
+        KeyCode::Char('C') => taken = Some(buf.truncate_here()),
+        KeyCode::Char('S') => taken = Some(buf.clear()),
+        // Only reachable with a selection up: the guard above sends the bare
+        // `c` and `d` off to wait for a motion instead.
+        KeyCode::Char('c' | 'd') => taken = buf.cut_selection(),
+        KeyCode::Char('y') => {
+            taken = buf.copy_selection();
+            buf.stop_visual();
+        }
+        KeyCode::Char(c @ ('p' | 'P')) => buf.paste(&register, c == 'p'),
         _ => return,
+    }
+
+    if let Some(text) = taken.filter(|t| !t.is_empty()) {
+        app.name_reg = text;
     }
 
     if insert {
@@ -259,17 +290,42 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
 
 /// Second key of `cw`, `cc`, `dw`, `dd`.
 fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
+    // `y` only reads, so it neither checkpoints nor touches the name: it runs
+    // the motion on a copy and keeps what that would have taken. Whatever
+    // `dw` deletes is by construction exactly what `yw` yanks.
+    if op == 'y' {
+        let Some(buf) = app.name_buffer() else { return };
+        let mut probe = buf.clone();
+        let taken = match key.code {
+            KeyCode::Char('y') => probe.clear(),
+            KeyCode::Char('w' | 'e') => probe.delete_word(key.code == KeyCode::Char('e')),
+            KeyCode::Char('b') => probe.delete_word_back(),
+            KeyCode::Char('$') => probe.truncate_here(),
+            _ => return,
+        };
+        if !taken.is_empty() {
+            app.name_reg = taken;
+        }
+        return;
+    }
+
     app.checkpoint();
     let Some(buf) = app.name_buffer() else { return };
 
-    match (op, key.code) {
+    let taken = match (op, key.code) {
         ('c', KeyCode::Char('c')) | ('d', KeyCode::Char('d')) => buf.clear(),
         // vim's own quirk: `cw` changes to the end of the word, the way `ce`
         // does, instead of eating the space after it like `dw`.
-        (_, KeyCode::Char('w' | 'e')) => buf.delete_word(op == 'c' || key.code == KeyCode::Char('e')),
+        (_, KeyCode::Char('w' | 'e')) => {
+            buf.delete_word(op == 'c' || key.code == KeyCode::Char('e'))
+        }
         (_, KeyCode::Char('b')) => buf.delete_word_back(),
         (_, KeyCode::Char('$')) => buf.truncate_here(),
         _ => return,
+    };
+
+    if !taken.is_empty() {
+        app.name_reg = taken;
     }
 
     if op == 'c' {
@@ -297,13 +353,15 @@ fn edit_insert(app: &mut App, key: KeyEvent) {
     let Some(buf) = app.name_buffer() else { return };
     match key.code {
         KeyCode::Backspace => buf.backspace(),
-        KeyCode::Delete => buf.delete_here(),
+        // Insert mode deletes do not fill the register: in vi only a normal
+        // mode delete is also a yank.
+        KeyCode::Delete => drop(buf.delete_here()),
         KeyCode::Left => buf.left(),
         KeyCode::Right => buf.append_here(),
         KeyCode::Home => buf.jump_start(),
         KeyCode::End => buf.append_at_end(),
-        KeyCode::Char('u') if ctrl => buf.clear(),
-        KeyCode::Char('w') if ctrl => buf.delete_word_back(),
+        KeyCode::Char('u') if ctrl => drop(buf.clear()),
+        KeyCode::Char('w') if ctrl => drop(buf.delete_word_back()),
         KeyCode::Char(c) => buf.insert(c),
         _ => {}
     }

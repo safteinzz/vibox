@@ -113,6 +113,16 @@ impl App {
         self.edit.as_ref().map_or(0, |edit| edit.buf.scroll())
     }
 
+    /// True while `v` has a selection up inside the name being typed.
+    pub fn name_selecting(&self) -> bool {
+        self.edit.as_ref().is_some_and(|edit| edit.buf.selecting())
+    }
+
+    /// The selected span of the name being typed, both ends included.
+    pub fn name_selection(&self) -> Option<(usize, usize)> {
+        self.edit.as_ref()?.buf.selection()
+    }
+
     /// True while the name being typed belongs to a track row.
     pub fn renaming_a_track(&self) -> bool {
         matches!(self.renaming(), Some(Renaming::Track(_)))

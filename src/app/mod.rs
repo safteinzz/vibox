@@ -247,6 +247,12 @@ pub struct App {
     pub count: Option<usize>,
     /// Half typed multi key sequence: `g`, `z`, `d`, `y` or ctrl-w.
     pub pending: Option<char>,
+    /// What the last delete or yank inside a name took, for `p` to put back.
+    ///
+    /// Deliberately not the same register as the one `y` and `p` use on track
+    /// rows: that one holds files, and pasting a file into a filename is not
+    /// a thing anyone means.
+    pub name_reg: String,
 
     pub last_search: String,
     pub search_back: bool,
@@ -350,6 +356,7 @@ impl App {
             line_insert: true,
             count: None,
             pending: None,
+            name_reg: String::new(),
             last_search: String::new(),
             search_back: false,
             visual_anchor: None,

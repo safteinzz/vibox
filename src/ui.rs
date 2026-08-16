@@ -596,7 +596,14 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
                 cursor_at = Some((x.min(inner.right().saturating_sub(1)), inner.y + shown));
                 lines.push(Line::styled(truncate(&label, w), style));
             } else {
-                lines.push(row_with_cursor(&truncate(&label, w), col, style, app.mode));
+                let picked = name_selection_at(app, 0, 0);
+                lines.push(row_with_cursor(
+                    &truncate(&label, w),
+                    col,
+                    style,
+                    app.mode,
+                    picked,
+                ));
             }
         } else {
             lines.push(Line::styled(truncate(&label, w), style));
@@ -654,7 +661,13 @@ fn draw_playlists(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
             let shown = renamed.unwrap_or_else(|| name.clone());
             if editing {
                 let col = app.name_col();
-                row_with_cursor(&truncate(&shown, w), col, style, app.mode)
+                row_with_cursor(
+                    &truncate(&shown, w),
+                    col,
+                    style,
+                    app.mode,
+                    name_selection_at(app, 0, 0),
+                )
             } else {
                 Line::styled(truncate(&shown, w), style)
             }
@@ -899,7 +912,14 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                 cursor_at = Some((x.min(area.right().saturating_sub(1)), area.y + rows));
                 lines.push(Line::styled(truncate(&body, w), base));
             } else {
-                lines.push(row_with_cursor(&truncate(&body, w), pad + col, base, app.mode));
+                let picked = name_selection_at(app, pad, scroll);
+                lines.push(row_with_cursor(
+                    &truncate(&body, w),
+                    pad + col,
+                    base,
+                    app.mode,
+                    picked,
+                ));
             }
         } else {
             lines.push(Line::styled(truncate(&body, w), base));
@@ -981,7 +1001,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         app.view.len(),
     );
 
-    let left = format!(" {} ", app.mode.label());
+    // A selection inside a name is still `Mode::Edit`, but saying EDIT while
+    // half a filename is highlighted is a lie about what the next key does.
+    let left = if app.name_selecting() {
+        " VISUAL ".to_string()
+    } else {
+        format!(" {} ", app.mode.label())
+    };
     // Which pane has the keyboard, so `dd` never surprises anyone.
     let where_ = match (app.focus, app.tab) {
         (Pane::Folders, Tab::Playlists) => " PLAYLISTS ",
@@ -1062,12 +1088,29 @@ fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Splits a rendered row so one cell carries the cursor.
-fn row_with_cursor(row: &str, at: usize, base: Style, mode: Mode) -> Line<'static> {
+/// The name's selection moved into the coordinates of the row it is drawn in:
+/// shifted right by whatever sits in front of the name, and left by however
+/// far the name has scrolled inside its column.
+fn name_selection_at(app: &App, offset: usize, scroll: usize) -> Option<(usize, usize)> {
+    let (lo, hi) = app.name_selection()?;
+    if hi < scroll {
+        return None;
+    }
+    Some((
+        offset + lo.saturating_sub(scroll),
+        offset + hi.saturating_sub(scroll),
+    ))
+}
+
+fn row_with_cursor(
+    row: &str,
+    at: usize,
+    base: Style,
+    mode: Mode,
+    selection: Option<(usize, usize)>,
+) -> Line<'static> {
     let text: Vec<char> = row.chars().collect();
     let at = at.min(text.len().saturating_sub(1));
-    let before: String = text[..at].iter().collect();
-    let under = text.get(at).copied().unwrap_or(' ');
-    let after: String = text.get(at + 1..).unwrap_or(&[]).iter().collect();
 
     // Solid colour, not a modifier: reversing an already reversed row is
     // invisible, which is exactly how the cursor got lost before.
@@ -1079,12 +1122,33 @@ fn row_with_cursor(row: &str, at: usize, base: Style, mode: Mode) -> Line<'stati
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD)
     };
+    let picked = Style::default().bg(Color::Magenta).fg(Color::Black);
 
-    Line::from(vec![
-        Span::styled(before, base),
-        Span::styled(under.to_string(), cursor),
-        Span::styled(after, base),
-    ])
+    // One span per character would be correct and wasteful, so runs of the
+    // same style are glued back together as we go.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut run_style = None;
+
+    for (i, c) in text.iter().enumerate() {
+        let style = if i == at {
+            cursor
+        } else if selection.is_some_and(|(lo, hi)| i >= lo && i <= hi) {
+            picked
+        } else {
+            base
+        };
+        if run_style != Some(style) && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), run_style.unwrap_or(base)));
+        }
+        run_style = Some(style);
+        run.push(*c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, run_style.unwrap_or(base)));
+    }
+
+    Line::from(spans)
 }
 
 /// The line being edited, with a block where the cursor is. A hollow looking
@@ -1160,7 +1224,10 @@ const HELP: &[HelpSection] = &[
             ("", "nothing reaches the disk until `:w`"),
             ("c", "rename what the cursor is on: a track, folder or playlist"),
             ("i a I A", "insert while renaming, esc goes back to the motions"),
-            ("cw cc dw x D C", "the usual operators, inside the name"),
+            ("cw cc dw yw yy x D C", "the usual operators, inside the name"),
+            ("v", "while renaming, select inside the name; esc drops it"),
+            ("d c y", "on that selection: cut, change, or copy it"),
+            ("p P", "put what the last delete or copy took, after or before"),
             ("j k", "while renaming, take the name and move to the next row"),
             ("V, y", "select a run of tracks, yank the selection"),
             ("p", "put the yank in a playlist, or the cut in a folder"),
