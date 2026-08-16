@@ -82,6 +82,7 @@ fn main() -> Result<()> {
 
     // A path on the command line is for this session only; with none, the
     // library is whatever `:set root=` put in the rc file.
+    let argv_root = cli.path.is_some();
     let root = match cli.path {
         Some(p) => p,
         None => excmd::configured_music()
@@ -100,7 +101,7 @@ fn main() -> Result<()> {
 
     let mut app = app?;
     excmd::load_state(&mut app);
-    excmd::load_rc(&mut app);
+    excmd::load_rc(&mut app, argv_root);
     let terminal = ratatui::init();
     let result = run(terminal, &mut app);
     ratatui::restore();

@@ -318,7 +318,14 @@ pub fn configured_music() -> Option<PathBuf> {
 
 /// Runs the rc file. Every line is an ex command without its `:`, and `"`
 /// starts a comment, the way a vimrc reads.
-pub fn load_rc(app: &mut App) {
+/// Runs the rc file.
+///
+/// `argv_root` is true when a library was named on the command line. That one
+/// wins for this session, so the rc's `set root=` is remembered for `:mkrc`
+/// and for the next launch without it, but must not reopen over the library
+/// the user actually asked for. `:set root=` typed by hand still opens, since
+/// that is someone saying so now.
+pub fn load_rc(app: &mut App, argv_root: bool) {
     let Some(path) = rc_path() else {
         return;
     };
@@ -330,9 +337,23 @@ pub fn load_rc(app: &mut App) {
         if line.is_empty() || line.starts_with('"') {
             continue;
         }
-        run(app, line.trim_start_matches(':'));
+        let line = line.trim_start_matches(':');
+        match rc_root(line) {
+            Some(rest) if argv_root => app.music = Some(expand(rest)),
+            _ => run(app, line),
+        }
     }
     app.msg = None;
+}
+
+/// The library an rc line names, if that is what it does: `set root=<path>`.
+fn rc_root(line: &str) -> Option<&str> {
+    let cmd = parse(line)?;
+    if matches!(cmd.name, "set" | "se") {
+        cmd.args.strip_prefix("root=")
+    } else {
+        None
+    }
 }
 
 /// `:mkrc`, after vim's `:mkvimrc`: writes the current options back out.
