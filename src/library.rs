@@ -17,6 +17,13 @@ pub const AUDIO_EXTS: [&str; 8] = ["mp3", "flac", "ogg", "opus", "m4a", "aac", "
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Track {
     pub path: PathBuf,
+    /// False for a track a playlist named from outside the library.
+    ///
+    /// Those are read in so the playlist can play them, but they are not part
+    /// of the library: `everything` and the folder list must not grow a stray
+    /// directory because a playlist mentioned one. Set where the track is
+    /// born, so it does not depend on what `root` happens to be.
+    pub in_library: bool,
     /// Filename without its extension. This is what the track list shows; the
     /// tag title is kept for the statusline and for mpris.
     pub file: String,
@@ -59,6 +66,9 @@ fn read_track(path: &Path) -> Track {
 
     let mut track = Track {
         path: path.to_path_buf(),
+        // Everything a scan finds is the library, whether the root is a
+        // directory or an m3u. Only `App::open_playlist` clears this.
+        in_library: true,
         file: stem.clone(),
         title: stem.clone(),
         artist: String::new(),
@@ -274,12 +284,12 @@ pub fn sort(tracks: &mut [Track], key: SortKey) {
 
 /// The directories that actually contain tracks, as shown in the left pane.
 pub fn folders(tracks: &[Track], root: &Path) -> Vec<(String, PathBuf)> {
-    // Only what is under the root: a playlist can name files from anywhere,
-    // and those directories are not part of this library.
+    // Only the library itself: a playlist can name files from anywhere, and
+    // those directories are not part of this library.
     let mut dirs: BTreeSet<PathBuf> = tracks
         .iter()
+        .filter(|t| t.in_library)
         .map(|t| t.dir().to_path_buf())
-        .filter(|dir| !root.is_dir() || dir.starts_with(root))
         .collect();
     // Directories with no tracks in them count: a folder you just made has to
     // show up, or there is nowhere to move anything into.
@@ -371,6 +381,7 @@ mod tests {
     fn track(file: &str, artist: &str, secs: u64, path: &str) -> Track {
         Track {
             path: PathBuf::from(path),
+            in_library: true,
             file: file.into(),
             title: file.into(),
             artist: artist.into(),

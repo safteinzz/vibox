@@ -74,27 +74,13 @@ impl App {
         self.clamp();
     }
 
-    /// True for tracks that belong to the library itself.
-    ///
-    /// A playlist may name files anywhere on disk, and those are read in so it
-    /// can play them, but they are not part of the library: `everything` and
-    /// the folder list must not grow a stray directory because a playlist
-    /// mentioned one.
-    fn in_library(&self, path: &Path) -> bool {
-        // With an m3u opened as the root, its tracks are the library.
-        !self.root.is_dir() || path.starts_with(&self.root)
-    }
-
     /// How many tracks `everything` actually shows.
     ///
     /// Not `tracks.len()`: a playlist naming files from outside the library
     /// reads them in so it can play them, and those sit in `tracks` without
     /// ever being part of the library.
     pub fn library_len(&self) -> usize {
-        self.tracks
-            .iter()
-            .filter(|t| self.in_library(&t.path))
-            .count()
+        self.tracks.iter().filter(|t| t.in_library).count()
     }
 
     /// Recomputes the visible track list from the playlist or the folder.
@@ -108,7 +94,7 @@ impl App {
         // buffer, so it should look like the edit already happened.
         self.view = match self.folder_open {
             0 => (0..self.tracks.len())
-                .filter(|&t| self.in_library(&self.tracks[t].path))
+                .filter(|&t| self.tracks[t].in_library)
                 .collect(),
             i => {
                 let dir = self.folders[i - 1].1.clone();

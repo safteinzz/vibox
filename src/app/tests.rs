@@ -456,11 +456,39 @@ fn a_playlist_of_outside_tracks_never_joins_the_library() {
         2,
         "everything is the library, not the library plus a playlist's strays"
     );
+    assert_eq!(
+        app.library_len(),
+        app.view.len(),
+        "the count beside `everything` counts what `everything` shows"
+    );
     assert!(
         !app.folders.iter().any(|(label, _)| label.contains("HOLA")),
         "a folder outside the root has no business in the folder list"
     );
     assert!(dir.path().join("a.mp3").exists());
+}
+
+/// An m3u opened as the root is the opposite case: its tracks live wherever
+/// they like, and all of them are the library, because that is what the user
+/// asked to open.
+#[test]
+fn an_m3u_opened_as_the_root_makes_its_tracks_the_library() {
+    let dir = tempfile::tempdir().unwrap();
+    let far = dir.path().join("somewhere/else/far.mp3");
+    std::fs::create_dir_all(far.parent().unwrap()).unwrap();
+    std::fs::write(&far, b"").unwrap();
+
+    let m3u = dir.path().join("list.m3u");
+    std::fs::write(&m3u, format!("#EXTM3U\n{}\n", far.display())).unwrap();
+
+    let app = App::new(m3u, SortKey::Path, library::QUIET).unwrap();
+
+    assert_eq!(app.view.len(), 1, "the m3u's track is shown");
+    assert_eq!(
+        app.library_len(),
+        1,
+        "a track named by the root m3u is the library, not a stray"
+    );
 }
 
 #[test]

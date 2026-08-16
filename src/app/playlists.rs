@@ -476,10 +476,15 @@ impl App {
                 rows.push(row);
             } else if want.is_file() {
                 // A playlist may name tracks from outside the library; read
-                // them in rather than dropping them.
+                // them in rather than dropping them, but mark them so they
+                // stay reachable only through this playlist. Without that,
+                // `everything` and the folder pane grow rows the library
+                // never had.
                 match library::scan(&want) {
                     Ok(mut found) if !found.is_empty() => {
-                        self.tracks.push(found.remove(0));
+                        let mut stray = found.remove(0);
+                        stray.in_library = false;
+                        self.tracks.push(stray);
                         rows.push(self.tracks.len() - 1);
                     }
                     _ => missing += 1,
