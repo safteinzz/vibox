@@ -35,13 +35,35 @@ const TICK: Duration = Duration::from_millis(200);
 /// Redraw cadence while the visualiser is running.
 const FRAME: Duration = Duration::from_millis(50);
 
+const AFTER: &str = concat!(
+    "The library is just a directory. `:e <dir>` opens another one, `c` edits the\n\
+     filenames in it, and `:help` lists every key.",
+    "\n\nby ",
+    env!("CARGO_PKG_AUTHORS"),
+    "  ",
+    env!("CARGO_PKG_REPOSITORY"),
+);
+
+/// `-V` stays a bare version string for scripts; `--version` spells out who
+/// wrote it, under what license, and where it lives. Every field comes from
+/// Cargo.toml, so none of it can drift from the manifest.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    env!("CARGO_PKG_AUTHORS"),
+    "\n",
+    env!("CARGO_PKG_LICENSE"),
+    "  ",
+    env!("CARGO_PKG_REPOSITORY"),
+);
+
 #[derive(Parser)]
 #[command(
     name = "vibox",
     version,
+    long_version = LONG_VERSION,
     about,
-    after_help = "The library is just a directory. `:e <dir>` opens another one, `c` edits the\n\
-                  filenames in it, and `:help` lists every key."
+    after_help = AFTER
 )]
 struct Cli {
     #[command(subcommand)]

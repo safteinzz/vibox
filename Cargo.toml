@@ -6,6 +6,7 @@ edition = "2024"
 # instead of a clear message without this.
 rust-version = "1.88"
 description = "a jukebox you exit with :q - a cli music player with vi motions, ex commands, and tmux manners"
+authors = ["Pablo Antonio Hernández Hernández (safteinzz)"]
 license = "AGPL-3.0-only"
 repository = "https://gitlab.com/safteinzz/vibox"
 readme = "README.md"
