@@ -224,35 +224,33 @@ impl App {
 
     /// Renames every changed file. Names are checked first, so a bad one stops
     /// the whole write instead of leaving the batch half applied.
-    pub fn apply_edits(&mut self) {
+    pub fn apply_edits(&mut self, steps: &[crate::app::plan::Step]) {
         self.commit_name();
         if self.renames.is_empty() {
             return;
         }
 
-        // Everything is checked before anything runs: a bad name stops the
-        // whole write rather than leaving half a folder renamed.
-        let queued: Vec<(Renaming, String)> = self
+        // `App::write_plan` has already checked the batch; what it adds here is
+        // the order. A rename whose target is another one's source has to wait
+        // for that one, or it lands on a name still in use.
+        let order: Vec<&PathBuf> = steps
+            .iter()
+            .filter_map(|step| match step {
+                crate::app::plan::Step::Rename(_, to) => Some(to),
+                _ => None,
+            })
+            .collect();
+
+        let mut queued: Vec<(Renaming, String)> = self
             .renames
             .iter()
             .map(|(what, name)| (what.clone(), name.trim().to_string()))
             .collect();
-        for (what, name) in &queued {
-            if name.is_empty() {
-                self.error("a name cannot be empty");
-                return;
-            }
-            if name.contains('/') {
-                self.error("a name cannot contain `/`, this renames but never moves");
-                return;
-            }
-            if let Some(to) = self.rename_target(what, name)
-                && to.exists()
-            {
-                self.error(format!("`{name}` already exists here"));
-                return;
-            }
-        }
+        queued.sort_by_key(|(what, name)| {
+            self.rename_target(what, name)
+                .and_then(|to| order.iter().position(|planned| **planned == to))
+                .unwrap_or(usize::MAX)
+        });
 
         let mut files = 0;
         let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -263,6 +261,13 @@ impl App {
                     let Some(new) = self.rename_target(&Renaming::Track(idx), &name) else {
                         continue;
                     };
+                    // `fs::rename` overwrites without asking, so the last word
+                    // is right here rather than only in the plan: between the
+                    // check and now, something else could have taken the name.
+                    if new.exists() && new != old {
+                        self.error(format!("`{name}` appeared while writing, nothing else written"));
+                        return;
+                    }
                     match std::fs::rename(&old, &new) {
                         Ok(()) => {
                             self.tracks[idx].path = new.clone();
@@ -275,6 +280,10 @@ impl App {
                 }
                 Renaming::Folder(old) => {
                     let new = old.with_file_name(&name);
+                    if new.exists() && new != old {
+                        self.error(format!("`{name}` appeared while writing, nothing else written"));
+                        return;
+                    }
                     if let Err(e) = std::fs::rename(&old, &new) {
                         self.error(format!("cannot rename `{name}`: {e}"));
                         continue;
@@ -295,6 +304,10 @@ impl App {
                         continue;
                     };
                     let to = dir.join(format!("{name}.m3u"));
+                    if to.exists() && *old != name {
+                        self.error(format!("`{name}` appeared while writing, nothing else written"));
+                        return;
+                    }
                     if let Err(e) = std::fs::rename(dir.join(format!("{old}.m3u")), &to) {
                         self.error(format!("cannot rename `{old}`: {e}"));
                         continue;
@@ -331,7 +344,49 @@ impl App {
     }
 
     /// Where a rename would put something, for the checks and the write.
-    fn rename_target(&self, what: &Renaming, name: &str) -> Option<PathBuf> {
+    /// Drops any pending rename of these paths.
+    ///
+    /// A file that is about to be deleted has no business also being renamed:
+    /// `:w` would have to do both to one path, and the delete is what the user
+    /// meant last.
+    pub(super) fn forget_renames(&mut self, gone: &[PathBuf]) {
+        let doomed: Vec<Renaming> = self
+            .renames
+            .keys()
+            .filter(|what| {
+                self.rename_source_of(what)
+                    .is_some_and(|from| gone.contains(&from))
+            })
+            .cloned()
+            .collect();
+        for what in doomed {
+            self.renames.remove(&what);
+        }
+        // The buffer being typed goes too, or leaving it puts the rename back.
+        if let Some(edit) = &self.edit
+            && self
+                .rename_source_of(&edit.what)
+                .is_some_and(|from| gone.contains(&from))
+        {
+            self.edit = None;
+        }
+    }
+
+    /// The path a rename would move away from, which is what makes it a
+    /// vacated name for anything else in the same batch.
+    pub(super) fn rename_source(&self, what: &Renaming) -> Option<PathBuf> {
+        self.rename_source_of(what)
+    }
+
+    fn rename_source_of(&self, what: &Renaming) -> Option<PathBuf> {
+        match what {
+            Renaming::Track(idx) => Some(self.tracks.get(*idx)?.path.clone()),
+            Renaming::Folder(path) => Some(path.clone()),
+            Renaming::Playlist(old) => Some(self.playlists_in()?.join(format!("{old}.m3u"))),
+        }
+    }
+
+    pub(super) fn rename_target(&self, what: &Renaming, name: &str) -> Option<PathBuf> {
         match what {
             Renaming::Track(idx) => {
                 let path = &self.tracks.get(*idx)?.path;

@@ -307,6 +307,8 @@ pub struct App {
     pub show_info: bool,
     /// How far `:changes` is panned sideways, in cells.
     pub changes_pan: usize,
+    /// First row shown, for a batch taller than the popup.
+    pub changes_top: usize,
     pub show_changes: bool,
     pub show_help: bool,
     pub help_scroll: usize,
@@ -389,6 +391,7 @@ impl App {
             history_top: 0,
             show_info: false,
             changes_pan: 0,
+            changes_top: 0,
             show_changes: false,
             show_help: false,
             help_scroll: 0,
@@ -430,6 +433,7 @@ fn seed() -> u64 {
 // The rest of `impl App`, split by what each part deals with. Several impl
 // blocks for one type are ordinary rust; the split is so a reader can find
 // things, and so each area only reaches what it needs.
+pub mod plan;
 mod scan;
 mod cursor;
 mod undo;

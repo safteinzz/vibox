@@ -96,7 +96,7 @@ fn a_move_onto_an_existing_file_stops_the_whole_batch() {
         (root.join("b.mp3"), root.join("jazz/b.mp3")),
         (root.join("a.mp3"), root.join("jazz/a.mp3")),
     ];
-    assert!(app.move_problem().is_some(), "the clash has to be caught");
+    assert!(app.write_plan().is_err(), "the clash has to be caught");
 
     app.write_all();
     assert!(
@@ -116,7 +116,7 @@ fn two_files_moved_onto_the_same_name_are_refused() {
         (root.join("one/x.mp3"), root.join("all/x.mp3")),
         (root.join("two/x.mp3"), root.join("all/x.mp3")),
     ];
-    assert!(app.move_problem().is_some());
+    assert!(app.write_plan().is_err());
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn renaming_the_playing_track_keeps_playback_pointed_at_it() {
 
     app.begin_edit();
     set_name(&mut app, "renamed");
-    app.apply_edits();
+    app.write_all();
 
     let playing = app.playing.expect("still playing something");
     assert_eq!(app.tracks[playing].file, "renamed");
@@ -293,7 +293,7 @@ fn renaming_a_folder_is_one_rename_and_the_tracks_follow() {
     app.begin_sidebar_edit();
     set_name(&mut app, "Jazz");
     assert!(app.edit_dirty());
-    app.apply_edits();
+    app.write_all();
 
     assert!(dir.path().join("Jazz/a.mp3").exists());
     assert!(dir.path().join("Jazz/live/b.mp3").exists(), "subfolders come too");
@@ -312,7 +312,7 @@ fn renaming_a_playlist_keeps_the_tab_showing_it() {
 
     app.begin_sidebar_edit();
     set_name(&mut app, "roadtrip");
-    app.apply_edits();
+    app.write_all();
 
     assert_eq!(app.playlist_view.as_deref(), Some("roadtrip"));
     assert!(app.playlists.iter().any(|(name, _)| name == "roadtrip"));
@@ -624,5 +624,256 @@ fn pasted_files_stay_where_they_were_dropped() {
     // and a sort is what puts it back in order
     app.set_sort(SortKey::Path);
     assert_eq!(app.moves.len(), 1, "the move is still only pending");
+}
+
+/// The whole point of the batch check: a `:w` that cannot run must leave the
+/// disk exactly as it found it, including the deletions, which are the part
+/// that cannot be taken back.
+#[test]
+fn a_refused_write_deletes_nothing() {
+    let (mut app, dir) = library(&["a.mp3", "b.mp3", "gone.mp3"]);
+    app.danger = true;
+
+    // mark one for deletion, and rename another onto a name already taken
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "gone").unwrap();
+    app.cut_tracks();
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.begin_edit();
+    set_name(&mut app, "b");
+    app.commit_name();
+
+    app.write_all();
+
+    assert!(dir.path().join("gone.mp3").exists(), "a refused write deletes nothing");
+    assert!(dir.path().join("a.mp3").exists(), "and renames nothing");
+    assert!(dir.path().join("b.mp3").exists());
+    assert!(app.unsaved(), "it is all still pending");
+}
+
+/// The case that started this: the name you want is taken by a song you are
+/// deleting in the same write.
+#[test]
+fn a_rename_onto_a_song_being_deleted_goes_through() {
+    let (mut app, dir) = library(&["keep.mp3", "dupe.mp3"]);
+    app.danger = true;
+
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "dupe").unwrap();
+    app.cut_tracks();
+
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "keep").unwrap();
+    app.begin_edit();
+    set_name(&mut app, "dupe");
+    app.commit_name();
+
+    app.write_all();
+
+    assert!(dir.path().join("dupe.mp3").exists(), "the name was freed and taken");
+    assert!(!dir.path().join("keep.mp3").exists(), "the rename happened");
+    assert_eq!(app.tracks.len(), 1, "one file, not two");
+    assert!(!app.unsaved(), "nothing left pending");
+}
+
+/// `fs::rename` overwrites silently, so a file vibox does not even list has to
+/// be safe from a rename that would land on it.
+#[test]
+fn a_rename_never_overwrites_a_file_that_is_not_a_track() {
+    let (mut app, dir) = library(&["song.mp3"]);
+    std::fs::write(dir.path().join("cover.mp3"), b"artwork").unwrap();
+
+    // vibox has not scanned it as a track, but the name is taken on disk
+    app.cur = 0;
+    app.begin_edit();
+    set_name(&mut app, "cover");
+    app.commit_name();
+    app.write_all();
+
+    assert_eq!(
+        std::fs::read(dir.path().join("cover.mp3")).unwrap(),
+        b"artwork",
+        "the file that was already there is untouched"
+    );
+    assert!(dir.path().join("song.mp3").exists(), "and the rename did not happen");
+}
+
+/// Two rows renamed to the same thing must not leave the second quietly
+/// overwriting the first.
+#[test]
+fn two_rows_renamed_to_one_name_are_refused() {
+    let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
+
+    app.cur = 0;
+    app.begin_edit();
+    set_name(&mut app, "same");
+    app.edit_next_row(1);
+    set_name(&mut app, "same");
+    app.commit_name();
+
+    app.write_all();
+
+    assert!(dir.path().join("a.mp3").exists());
+    assert!(dir.path().join("b.mp3").exists());
+    assert!(app.unsaved(), "both renames are still pending");
+}
+
+/// The hole that cost files rather than patience: a rename and a move both
+/// claiming one name. Each was checked against its own list only, so both were
+/// allowed, and `fs::rename` overwrote the first with the second without a
+/// word.
+#[test]
+fn a_rename_and_a_move_onto_the_same_name_are_refused() {
+    let (mut app, dir) = library(&["a.mp3", "sub/x.mp3"]);
+    let root = dir.path().to_path_buf();
+    app.danger = true;
+
+    // the move: sub/x.mp3 into the root
+    app.moves = vec![(root.join("sub/x.mp3"), root.join("x.mp3"))];
+
+    // and a rename claiming the same name
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.begin_edit();
+    set_name(&mut app, "x");
+    app.commit_name();
+
+    app.write_all();
+
+    assert!(root.join("a.mp3").exists(), "the rename did not run");
+    assert!(root.join("sub/x.mp3").exists(), "and neither did the move");
+    assert!(
+        !root.join("x.mp3").exists(),
+        "nothing was written, so nothing could be overwritten"
+    );
+}
+
+/// Deleting a row you had already renamed drops the rename: you meant to be
+/// rid of the file, and `:w` cannot both rename and delete one path.
+#[test]
+fn deleting_a_row_you_renamed_drops_the_rename() {
+    let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
+    app.danger = true;
+
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.begin_edit();
+    set_name(&mut app, "renamed");
+    app.commit_name();
+    assert!(app.edit_dirty(), "the rename is pending");
+
+    app.cut_tracks();
+    assert!(!app.edit_dirty(), "and deleting the row takes it back");
+
+    app.write_all();
+
+    assert!(!dir.path().join("a.mp3").exists(), "the file is gone");
+    assert!(!dir.path().join("renamed.mp3").exists(), "and was never renamed");
+    assert!(dir.path().join("b.mp3").exists(), "the other one is untouched");
+    assert!(!app.unsaved(), "nothing left pending");
+}
+
+/// Deleting one row must not take another row's pending rename with it.
+#[test]
+fn deleting_a_row_leaves_other_pending_renames_alone() {
+    let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
+    app.danger = true;
+
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.begin_edit();
+    set_name(&mut app, "renamed");
+    app.commit_name();
+
+    // delete the other one
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "b").unwrap();
+    app.cut_tracks();
+    app.write_all();
+
+    assert!(dir.path().join("renamed.mp3").exists(), "the rename still happened");
+    assert!(!dir.path().join("b.mp3").exists(), "and the deletion did too");
+}
+
+/// A folder is the same rule one level up: deleting it drops the renames
+/// pending on it and on everything inside it.
+#[test]
+fn deleting_a_folder_drops_the_renames_inside_it() {
+    let (mut app, dir) = library(&["jazz/a.mp3", "keep.mp3"]);
+    app.danger = true;
+
+    // rename a track inside the folder
+    let jazz = app.folders.iter().position(|(label, _)| label == "jazz").unwrap();
+    app.folder_cur = jazz + 1;
+    app.open_folder();
+    app.cur = 0;
+    app.begin_edit();
+    set_name(&mut app, "renamed");
+    app.commit_name();
+    assert!(app.edit_dirty());
+
+    // then delete the folder out from under it
+    app.focus = Pane::Folders;
+    app.folder_cur = jazz + 1;
+    app.cut_folder();
+    assert!(!app.edit_dirty(), "the rename inside went with the folder");
+
+    app.write_all();
+    assert!(!dir.path().join("jazz").exists(), "the folder is gone");
+    assert!(dir.path().join("keep.mp3").exists());
+}
+
+/// And renaming the folder itself, then deleting it.
+#[test]
+fn deleting_a_folder_drops_the_rename_of_the_folder() {
+    let (mut app, dir) = library(&["jazz/a.mp3"]);
+    app.danger = true;
+
+    let jazz = app.folders.iter().position(|(label, _)| label == "jazz").unwrap();
+    app.folder_cur = jazz + 1;
+    app.tab = Tab::Folders;
+    app.begin_sidebar_edit();
+    set_name(&mut app, "Jazz");
+    app.commit_name();
+    assert!(app.edit_dirty());
+
+    app.cut_folder();
+    assert!(!app.edit_dirty(), "the folder rename went with the folder");
+
+    app.write_all();
+    assert!(!dir.path().join("jazz").exists());
+    assert!(!dir.path().join("Jazz").exists(), "and it was never renamed on the way out");
+}
+
+/// Playlists are the third thing that can be renamed and deleted at once.
+#[test]
+fn deleting_a_playlist_drops_its_pending_rename() {
+    let (mut app, _dir) = library(&["a.mp3"]);
+    app.create_playlist("mix");
+    app.tab = Tab::Playlists;
+    app.pl_cur = 0;
+
+    app.begin_sidebar_edit();
+    set_name(&mut app, "roadtrip");
+    app.commit_name();
+    assert!(app.edit_dirty());
+
+    app.delete_playlist();
+    assert!(!app.edit_dirty(), "the rename went with the playlist");
+
+    app.write_all();
+    assert!(app.playlists.is_empty(), "the playlist is gone");
+}
+
+/// Undo has to put the rename back with the deletion it was dropped for.
+#[test]
+fn undoing_a_deletion_brings_its_rename_back() {
+    let (mut app, _dir) = library(&["a.mp3", "b.mp3"]);
+    app.danger = true;
+
+    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.begin_edit();
+    set_name(&mut app, "renamed");
+    app.commit_name();
+
+    app.cut_tracks();
+    assert!(!app.edit_dirty());
+
+    app.undo();
+    assert!(app.edit_dirty(), "the rename is pending again");
+    assert!(app.doomed_files.is_empty(), "and nothing is marked for deletion");
 }
 

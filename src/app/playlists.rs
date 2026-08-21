@@ -118,6 +118,7 @@ impl App {
             self.doomed.remove(at);
             self.info(format!("`{name}` kept"));
         } else {
+            self.forget_renames(std::slice::from_ref(&path));
             self.doomed.push(path);
             self.info(format!("`{name}` will be deleted on `:w`, `dd` undoes it"));
         }
@@ -197,14 +198,26 @@ impl App {
     /// A path as `root/...`, since every change is inside the library anyway.
     /// Quoted when it has a space in it, so the arrow stays readable.
     pub fn under_root(&self, path: &Path) -> String {
-        let shown = match path.strip_prefix(&self.root) {
-            Ok(rel) => format!("root/{}", rel.display()),
-            Err(_) => path.display().to_string(),
-        };
+        let shown = self.plain_under_root(path);
         if shown.contains(' ') {
             format!("'{shown}'")
         } else {
             shown
+        }
+    }
+
+    /// The same without the quotes and without the `root/` prefix.
+    ///
+    /// `under_root` quotes a name that contains a space, which is right for a
+    /// one line message and wrong for `:changes`: the two names sit in their
+    /// own columns there, and a quote that only one of them earns shows up as
+    /// a change the rename never made. `root/` goes for the same reason it is
+    /// there at all: on one line it says which tree this is, and on a screen
+    /// where every row starts with it, it only costs width the names want.
+    pub fn plain_under_root(&self, path: &Path) -> String {
+        match path.strip_prefix(&self.root) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => path.display().to_string(),
         }
     }
 
@@ -224,19 +237,23 @@ impl App {
             }
         }
         for (what, name) in &queued {
+            // The target comes from `rename_target`, the same thing the write
+            // uses, or `:changes` shows a name `:w` would never produce: it
+            // puts the extension back, and building the path here by hand
+            // dropped it.
+            let Some(to) = self.rename_target(what, name) else {
+                continue;
+            };
             out.push(match what {
-                Renaming::Track(idx) => {
-                    let path = &self.tracks[*idx].path;
-                    format!(
-                        "rename  {}  ->  {}",
-                        self.under_root(path),
-                        self.under_root(&path.with_file_name(name))
-                    )
-                }
+                Renaming::Track(idx) => format!(
+                    "rename  {}  ->  {}",
+                    self.plain_under_root(&self.tracks[*idx].path),
+                    self.plain_under_root(&to)
+                ),
                 Renaming::Folder(path) => format!(
                     "rename  folder {}  ->  {}",
-                    self.under_root(path),
-                    self.under_root(&path.with_file_name(name))
+                    self.plain_under_root(path),
+                    self.plain_under_root(&to)
                 ),
                 Renaming::Playlist(old) => {
                     format!("rename  playlist `{old}`  ->  `{name}`")
@@ -260,24 +277,24 @@ impl App {
         for (from, to) in &self.moves {
             out.push(format!(
                 "move    {}  ->  {}",
-                self.under_root(from),
-                self.under_root(to)
+                self.plain_under_root(from),
+                self.plain_under_root(to)
             ));
         }
         for (from, to) in &self.copies {
             out.push(format!(
                 "copy    {}  ->  {}",
-                self.under_root(from),
-                self.under_root(to)
+                self.plain_under_root(from),
+                self.plain_under_root(to)
             ));
         }
         for path in &self.doomed_files {
-            out.push(format!("DELETE  {}", self.under_root(path)));
+            out.push(format!("DELETE  {}", self.plain_under_root(path)));
         }
         for dir in &self.doomed_dirs {
             out.push(format!(
                 "DELETE  folder {}, and anything else left in it",
-                self.under_root(dir)
+                self.plain_under_root(dir)
             ));
         }
         out
@@ -308,12 +325,19 @@ impl App {
     /// `:w`: renames the files you edited and saves the playlist you changed,
     /// in one press, and says what it did.
     pub fn write_all(&mut self) {
-        // Checked before a single thing is written, so a clash leaves every
-        // change pending instead of applying half of them.
-        if let Some(problem) = self.move_problem() {
-            self.error(problem);
-            return;
-        }
+        // The whole batch is checked against the disk before a single byte is
+        // written, so a clash leaves every change pending instead of applying
+        // half of them. `plan` is the only thing allowed to say a write is
+        // safe: it sees the renames, moves, copies and deletions together,
+        // where the old per-kind checks each saw only their own.
+        self.commit_name();
+        let steps = match self.write_plan() {
+            Ok(steps) => steps,
+            Err(problem) => {
+                self.error(problem);
+                return;
+            }
+        };
 
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -321,8 +345,12 @@ impl App {
         let playlist = self.playlist_dirty;
         let deletes = !self.doomed.is_empty();
 
+        // Deletions go first: they are what frees a name for a rename in the
+        // same write, and by here the batch is already known to be appliable.
+        let freed = self.apply_doomed_files();
+
         if renames {
-            self.apply_edits();
+            self.apply_edits(&steps);
             // A failed batch leaves the names pending; do not go on and write a
             // playlist as if everything were fine.
             if self.edit_dirty() {
@@ -356,7 +384,8 @@ impl App {
             self.save_open_playlist();
         }
 
-        let (moved, copied, removed) = self.apply_file_ops();
+        let (moved, copied, dirs) = self.apply_file_ops();
+        let removed = freed + dirs;
         if moved + copied + removed > 0 {
             let before = self.msg.take();
             let mut parts = Vec::new();

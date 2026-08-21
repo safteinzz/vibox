@@ -37,6 +37,10 @@ impl App {
         self.checkpoint();
         let n = paths.len();
         self.cut.clone_from(&paths);
+        // Deleting a row you had renamed drops the rename: you meant to be rid
+        // of the file, and keeping both would ask `:w` to rename something it
+        // is also about to delete.
+        self.forget_renames(&paths);
         self.doomed_files.extend(paths);
         self.exit_visual();
         self.cur = self.cur.min(self.view.len().saturating_sub(1));
@@ -110,6 +114,11 @@ impl App {
             .map(|t| t.path.clone())
             .collect();
         let n = inside.len();
+        // Same as deleting a row: any rename pending on the folder or on what
+        // is inside it is dropped, since `:w` cannot rename what it deletes.
+        let mut forget = inside.clone();
+        forget.push(dir.clone());
+        self.forget_renames(&forget);
         self.doomed_files.extend(inside);
         self.doomed_dirs.push(dir);
         self.rebuild_view();
@@ -208,40 +217,43 @@ impl App {
         }
     }
 
-    /// Checks every pending move before any of them runs.
-    ///
-    /// A batch is all or nothing: moving three files into a folder where one of
-    /// them already exists must not move the other two and leave you to work
-    /// out which. Same rule as the rename batch.
-    pub(super) fn move_problem(&self) -> Option<String> {
-        let mut targets: Vec<&PathBuf> = Vec::new();
-        for (_, to) in self.moves.iter().chain(self.copies.iter()) {
-            if to.exists() {
-                return Some(format!(
-                    "`{}` already exists, nothing written",
-                    self.under_root(to)
-                ));
-            }
-            if targets.contains(&to) {
-                return Some(format!(
-                    "two files would both become `{}`, nothing written",
-                    self.under_root(to)
-                ));
-            }
-            targets.push(to);
-        }
-        None
-    }
-
     /// The file operations, run by `:w` after the renames and playlists.
     ///
     /// Playlists are repaired afterwards for the same reason a rename repairs
     /// them: a moved file must keep playing from its playlists, and a deleted
     /// one must not sit there as an entry that points nowhere.
+    /// The deletions, run first by `:w` because they are what frees a name for
+    /// a rename in the same write.
+    ///
+    /// Only ever called once the whole batch has been checked, so nothing is
+    /// deleted for a write that was going to be refused anyway.
+    pub(super) fn apply_doomed_files(&mut self) -> usize {
+        let mut gone = 0;
+        let mut removed: Vec<PathBuf> = Vec::new();
+        for path in std::mem::take(&mut self.doomed_files) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {
+                    removed.push(path);
+                    gone += 1;
+                }
+                // Already gone is the state we wanted, not a failure.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    removed.push(path);
+                    gone += 1;
+                }
+                Err(e) => self.error(format!("cannot delete `{}`: {e}", path.display())),
+            }
+        }
+        if !removed.is_empty() {
+            self.drop_from_playlists(&removed);
+            self.forget_tracks(&removed);
+        }
+        gone
+    }
+
     pub(super) fn apply_file_ops(&mut self) -> (usize, usize, usize) {
         let (mut moved, mut copied, mut gone) = (0, 0, 0);
         let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
-        let mut removed: Vec<PathBuf> = Vec::new();
 
         for (from, to) in std::mem::take(&mut self.moves) {
             match std::fs::rename(&from, &to) {
@@ -259,16 +271,6 @@ impl App {
                 copied += 1;
             }
         }
-        for path in std::mem::take(&mut self.doomed_files) {
-            match std::fs::remove_file(&path) {
-                Ok(()) => {
-                    removed.push(path);
-                    gone += 1;
-                }
-                Err(e) => self.error(format!("cannot delete `{}`: {e}", path.display())),
-            }
-        }
-
         // Deepest first, so a folder inside a marked folder is already gone.
         let mut dirs = std::mem::take(&mut self.doomed_dirs);
         dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
@@ -280,10 +282,6 @@ impl App {
         }
         if !done.is_empty() {
             self.repair_playlists(&done);
-        }
-        if !removed.is_empty() {
-            self.drop_from_playlists(&removed);
-            self.forget_tracks(&removed);
         }
 
         self.cut.clear();
