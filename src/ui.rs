@@ -523,9 +523,24 @@ fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
     let whole = block.inner(area);
     frame.render_widget(block, area);
 
-    // Tab header, lit on the side you are looking at. `gt` switches.
-    let [head, inner] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(whole);
+    // Which library, then the tab header. The root goes above rather than into
+    // the list, because "where am I" is the one thing that must not scroll
+    // away, and it is the slot a remote source would name itself in.
+    let [source, head, inner] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(whole);
+
+    let width = source.width as usize;
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!(" {}", crate::boot::short(&app.root, width.saturating_sub(2))),
+            Style::default().fg(Color::Green),
+        )),
+        source,
+    );
     let lit = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
@@ -1224,6 +1239,7 @@ const HELP: &[HelpSection] = &[
             ("", "nothing reaches the disk until `:w`"),
             ("c", "rename what the cursor is on: a track, folder or playlist"),
             ("i a I A", "insert while renaming, esc goes back to the motions"),
+            ("h l 0 ^ $ w b e", "move inside the name being renamed"),
             ("cw cc dw yw yy x D C", "the usual operators, inside the name"),
             ("v", "while renaming, select inside the name; esc drops it"),
             ("d c y", "on that selection: cut, change, or copy it"),
