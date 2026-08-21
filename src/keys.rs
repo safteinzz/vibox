@@ -178,7 +178,19 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    // `c` and `d` wait for their motion.
+    // A count, read before the pending operator rather than after it, so that
+    // `3w`, `3dw` and `d3w` all mean what vi says they mean. `0` is the motion
+    // to the front until a count has started, exactly as in vim.
+    if !ctrl
+        && let KeyCode::Char(c @ '0'..='9') = key.code
+        && (c != '0' || app.count.is_some())
+    {
+        let digit = c as usize - '0' as usize;
+        app.count = Some(app.count.unwrap_or(0) * 10 + digit);
+        return;
+    }
+
+    // `c`, `d` and `y` wait for their motion.
     if let Some(op) = app.pending.take() {
         edit_operator(app, op, key);
         return;
@@ -195,8 +207,10 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
             return;
         }
         // Leaving a name is not a write: it joins the pending set, like
-        // marking a file does, and `:w` writes the lot.
+        // marking a file does, and `:w` writes the lot. A half typed count
+        // goes with it, or it would land on the next key in normal mode.
         KeyCode::Esc => {
+            app.count = None;
             app.commit_name();
             app.mode = Mode::Normal;
             return;
@@ -245,6 +259,7 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
 
     let insert = matches!(key.code, KeyCode::Char('i' | 'a' | 'I' | 'A' | 'C' | 'S' | 'c'));
     let register = app.name_reg.clone();
+    let count = app.count.take().unwrap_or(1);
     let Some(buf) = app.name_buffer() else { return };
 
     // What this key took out of the name, if anything. A delete is a yank
@@ -252,19 +267,21 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
     let mut taken = None;
 
     match key.code {
-        KeyCode::Char('h') | KeyCode::Left => buf.left(),
-        KeyCode::Char('l') | KeyCode::Right => buf.right(),
+        KeyCode::Char('h') | KeyCode::Left => times(count, || buf.left()),
+        KeyCode::Char('l') | KeyCode::Right => times(count, || buf.right()),
         KeyCode::Char('0') => buf.jump_start(),
+        KeyCode::Char('^') => buf.jump_first_nonblank(),
         KeyCode::Char('$') => buf.jump_end(),
-        KeyCode::Char('w') if !ctrl => buf.jump_word_forward(),
-        KeyCode::Char('b') => buf.jump_word_back(),
-        KeyCode::Char('e') => buf.jump_word_end(),
+        KeyCode::Char('w') if !ctrl => times(count, || buf.jump_word_forward()),
+        KeyCode::Char('b') => times(count, || buf.jump_word_back()),
+        KeyCode::Char('e') => times(count, || buf.jump_word_end()),
         KeyCode::Char('v') => buf.toggle_visual(),
         KeyCode::Char('i') => {}
         KeyCode::Char('a') => buf.append_here(),
-        KeyCode::Char('I') => buf.jump_start(),
+        // vi's `I` inserts at the first non-blank, not at column zero.
+        KeyCode::Char('I') => buf.jump_first_nonblank(),
         KeyCode::Char('A') => buf.append_at_end(),
-        KeyCode::Char('x') | KeyCode::Delete => taken = Some(buf.delete_here()),
+        KeyCode::Char('x') | KeyCode::Delete => taken = Some(gather(count, || buf.delete_here())),
         KeyCode::Char('D') => taken = Some(buf.truncate_here()),
         KeyCode::Char('C') => taken = Some(buf.truncate_here()),
         KeyCode::Char('S') => taken = Some(buf.clear()),
@@ -275,7 +292,7 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
             taken = buf.copy_selection();
             buf.stop_visual();
         }
-        KeyCode::Char(c @ ('p' | 'P')) => buf.paste(&register, c == 'p'),
+        KeyCode::Char(c @ ('p' | 'P')) => times(count, || buf.paste(&register, c == 'p')),
         _ => return,
     }
 
@@ -288,18 +305,41 @@ fn edit_mode(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// Runs a motion `count` times, which is all a count means in vi.
+fn times(count: usize, mut motion: impl FnMut()) {
+    for _ in 0..count {
+        motion();
+    }
+}
+
+/// The same for an edit, keeping everything it took so `3x` fills the register
+/// with all three characters rather than only the last one.
+fn gather(count: usize, mut edit: impl FnMut() -> String) -> String {
+    let mut all = String::new();
+    for _ in 0..count {
+        all.push_str(&edit());
+    }
+    all
+}
+
 /// Second key of `cw`, `cc`, `dw`, `dd`.
 fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
     // `y` only reads, so it neither checkpoints nor touches the name: it runs
     // the motion on a copy and keeps what that would have taken. Whatever
     // `dw` deletes is by construction exactly what `yw` yanks.
+    // `d3w` and `3dw` are the same thing, so the count is read here whichever
+    // side of the operator it was typed on.
+    let count = app.count.take().unwrap_or(1);
+
     if op == 'y' {
         let Some(buf) = app.name_buffer() else { return };
         let mut probe = buf.clone();
         let taken = match key.code {
             KeyCode::Char('y') => probe.clear(),
-            KeyCode::Char('w' | 'e') => probe.delete_word(key.code == KeyCode::Char('e')),
-            KeyCode::Char('b') => probe.delete_word_back(),
+            KeyCode::Char('w' | 'e') => {
+                gather(count, || probe.delete_word(key.code == KeyCode::Char('e')))
+            }
+            KeyCode::Char('b') => gather(count, || probe.delete_word_back()),
             KeyCode::Char('$') => probe.truncate_here(),
             _ => return,
         };
@@ -316,10 +356,10 @@ fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
         ('c', KeyCode::Char('c')) | ('d', KeyCode::Char('d')) => buf.clear(),
         // vim's own quirk: `cw` changes to the end of the word, the way `ce`
         // does, instead of eating the space after it like `dw`.
-        (_, KeyCode::Char('w' | 'e')) => {
+        (_, KeyCode::Char('w' | 'e')) => gather(count, || {
             buf.delete_word(op == 'c' || key.code == KeyCode::Char('e'))
-        }
-        (_, KeyCode::Char('b')) => buf.delete_word_back(),
+        }),
+        (_, KeyCode::Char('b')) => gather(count, || buf.delete_word_back()),
         (_, KeyCode::Char('$')) => buf.truncate_here(),
         _ => return,
     };

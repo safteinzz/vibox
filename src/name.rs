@@ -78,6 +78,19 @@ impl NameBuffer {
         self.col = 0;
     }
 
+    /// `^`, and where `I` inserts: the first character that is not a space.
+    ///
+    /// The same as `0` for almost every name, and not the same for one that
+    /// was typed with a leading space, which is exactly when you want it.
+    pub fn jump_first_nonblank(&mut self) {
+        self.col = self
+            .text
+            .iter()
+            .position(|c| !c.is_whitespace())
+            .unwrap_or(0)
+            .min(self.last());
+    }
+
     pub fn jump_end(&mut self) {
         self.col = self.last();
     }
@@ -531,6 +544,52 @@ mod tests {
             assert_eq!(deleted, yanked, "`y{motion}` and `d{motion}` take the same text");
             assert!(!yanked.is_empty(), "`{motion}` had something to take");
         }
+    }
+
+    /// `^` is the first character that is not a space, `0` is the very front.
+    /// They only differ on a name typed with a leading space, which is the
+    /// case worth having the two keys for.
+    #[test]
+    fn caret_lands_on_the_first_real_character() {
+        let mut buf = buffer("  padded name", 8);
+        buf.jump_first_nonblank();
+        assert_eq!(buf.col(), 2);
+
+        buf.jump_start();
+        assert_eq!(buf.col(), 0, "`0` still goes to the very front");
+
+        let mut plain = buffer("no padding", 5);
+        plain.jump_first_nonblank();
+        assert_eq!(plain.col(), 0, "the same as `0` when nothing is blank");
+
+        let mut blank = buffer("   ", 2);
+        blank.jump_first_nonblank();
+        assert_eq!(blank.col(), 0, "a name of nothing but spaces holds at the front");
+
+        let mut empty = buffer("", 0);
+        empty.jump_first_nonblank();
+        assert_eq!(empty.col(), 0);
+    }
+
+    /// A count is just the motion again, so `3w` has to land where three
+    /// separate `w` presses would.
+    #[test]
+    fn a_counted_motion_is_the_motion_repeated() {
+        let mut counted = buffer("one two three four five", 0);
+        for _ in 0..3 {
+            counted.jump_word_forward();
+        }
+        let mut stepped = buffer("one two three four five", 0);
+        stepped.jump_word_forward();
+        stepped.jump_word_forward();
+        stepped.jump_word_forward();
+        assert_eq!(counted.col(), stepped.col());
+        assert_eq!(counted.col(), 14, "3w is on `four`");
+
+        let mut back = buffer("one two three four five", 14);
+        back.jump_word_back();
+        back.jump_word_back();
+        assert_eq!(back.col(), 4, "2b is back on `two`");
     }
 }
 
