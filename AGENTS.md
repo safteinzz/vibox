@@ -3,26 +3,32 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 -->
 # AGENTS.md
 
+Working brief for an AI coding agent, not documentation for people (the README covers that): the rules, invariants and gotchas needed to change this project correctly without rediscovering them.
+
 ## Hard rules
-- **Commit, push, and publish only when the user says to ship.** They test interactively first; a mid-work commit is never the deliverable.
-- Release flow, in this exact order: bump `version` in `Cargo.toml` **first** → `cargo clippy-all` clean + `cargo test` green, which is also what refreshes `Cargo.lock` with the new version → one commit (short conventional message, never co-authored) → `git push origin main` → `cargo publish` (dry-run first; publishing is irreversible) → **tag only after publish succeeds**: `git tag vX.Y.Z && git push origin --tags`. A tag must never point at a version that failed to publish.
-- Commit messages: short conventional tags (`feat:`, `fix:`, ...). **Never** add a `Co-Authored-By` trailer.
-- **No em-dashes** anywhere user-facing (README, --help, crate description, commit messages, prose) - they read as AI-generated text.
+- Commit, push, and publish only when the user says to ship; a mid-work commit is never the deliverable, because the user tests interactively first.
+- Commit messages are short single-line conventional ones (`feat:`, `fix:`, `chore:`, ...), never with a `Co-Authored-By` trailer and never with a verbose body.
+- Release flow, in this exact order: write the regression tests for what is about to ship -> bump `version` in `Cargo.toml` -> `cargo clippy-all` clean and `cargo test` green, which is also what refreshes `Cargo.lock` with the new version -> one commit -> `git push origin main` -> `cargo publish` (dry-run first, publishing is irreversible) -> tag only after publish succeeds with `git tag vX.Y.Z && git push origin --tags`; a tag must never point at a version that failed to publish, and the bump comes first because `cargo publish` fails on a `Cargo.lock` that still holds the old version.
+- Tests are written at ship time and only then: covering the behaviour that just settled is the first step of the release flow, so the suite grows once per release instead of once per commit.
+- Never write a test for behaviour that has not shipped yet, because code that is not in the last release tag is still being designed, and a test pinning a shape that is about to change is how a suite starts lying.
+- A test may only assert something the README or `--help` promises, or a pure-logic invariant (parsing, generation, path resolution, validation); never the shape of a private function and never the specific diff that was just made, since those rot on the next refactor and teach nothing about whether the program works.
+- Removing a promise from the README removes its tests in the same commit.
+- A test may only write inside a temp directory it deletes, never a real config, data, cache or content directory and never a fixed path, so a machine is left exactly as it was before the suite ran.
+- Never drive the interface to test it: build it, say what changed and what to look at, and let the user run it, because they see the screen instantly while an agent driving a pty or a tmux pane is slow and wrong about what it looks like; logic that is not visual can still be checked directly from `tests/`.
+- Never `cargo install` to test: run the release binary at `./target/release/vibox` directly, because installing replaces the binary on PATH with a work-in-progress build; install only when the user asks.
+- `main` is protected: no force-push and no history rewrite, so a mistake is fixed with a forward commit.
+- No em-dashes anywhere (code, comments, README, `--help`, crate description, commit messages, prose), because they read as AI-generated text; use `-` instead.
+- Fix the root cause, and if a workaround must ship say the word "workaround" out loud so a silent patch never passes as a real fix; the same goes for lints, where an `#[allow]` is never the answer and the code it points at gets fixed or deleted.
+- `TODO-LIST.md` (gitignored) holds one-line ideas, and the line is deleted when the idea ships.
 - **Never add a dependency that needs a C library, system headers, or an external binary.** `cargo install vibox` must succeed on a bare toolchain; a build that fails on a missing header is a broken product. This is why the audio output is written against the pulseaudio wire protocol instead of using cpal.
 - **The published crate has a lib target, and that lib is not a public API.** The split exists so `tests/` and `examples/` can reach the code, not so anyone can depend on `vibox` as a library. Nothing outside this repo is expected to `use vibox::...`, so a `pub` item moving or changing shape is not a breaking change and does not need a major bump. Do not start treating module paths as a contract.
-- **Test by running `./target/release/vibox` directly. Never `cargo install` to test**, it replaces the binary on PATH with a work-in-progress build; install only when the user asks.
 - **vibox never retags a track, and touches a music folder only in the ways the user asked for:** a rename typed in the edit buffer, and, with `:set danger` on, a move, copy, delete or `:mkdir`. Everything else about a library is read only. The README promises this across three sections (`Rename files in place`, `Nothing is written until :w`, `Danger mode`), so a feature that widens it without widening those is a lie in the documentation as well as a bug.
 - **`danger` never comes back on its own.** It is left out of the session state, which is written automatically on every quit, because it once leaked in there and came back silently every launch: that is the one failure this option must not have. `:mkrc` is the exception and does write it, since it is a command the user typed, and the write says `danger included` on the message row so it is never quiet. Anything else that persists options must follow the `save_state` side of this, not the `:mkrc` side.
 - **File operations are validated as a batch and applied together** (`App::move_problem` before anything runs): a target that already exists, or two files heading for the same name, stops the entire `:w` with everything still pending.
 - **Renames are validated as a batch before any of them runs** (no empty name, no `/`, no overwriting an existing file), so a bad name aborts the whole write instead of leaving a folder half renamed.
 - **Each view tab keeps its own cursor, scroll and sort**, snapshotted by `App::snapshot` on the way out and restored on the way back; state added to the view must be added to `ViewTab` too or it leaks between tabs.
-- **Never write tests as part of a change.** No feature, fix or refactor ships with a test attached, however large it is. The user asks for tests explicitly ("do tests now"), and only then are they written.
-- **A test may only write inside a `tempfile::tempdir()` that it deletes.** Never the user's music, config, data or cache directories, and never a fixed path: a contributor's machine must be exactly as it was before the suite ran. Anything in `App` that resolves to a real directory needs an override the test sets, which is what `App::playlists_dir` is for.
-- **When tests are asked for, test the application, not the change.** Cover behaviour that should hold whatever the code does inside: ex command parsing, motions and counts, search matching, m3u round trip, name validation before a rename batch. No test may encode a specific diff, a bug that was just fixed, or the shape of a private function, since those rot on the next refactor and teach nothing about whether vibox works.
 - **`unsafe` is banned.** vibox must build with no `unsafe` block anywhere, and no dependency may be added to work around that. A music player has no performance problem that justifies it, and the guarantee is worth more than any optimisation it would buy.
 - **A crash or a kill loses everything pending, and that is intended.** There is no swap file and no journal: `:w` is the only thing that writes, so force quitting is a valid way out of a mess. Never add a recovery file that would make a kill leave changes behind.
-- Fix the root cause. If a workaround must ship, say the word "workaround" out loud, so a silent patch never passes as a real fix. Same for lints: never `#[allow]` a warning away; delete or fix the code it points at.
-- `TODO-LIST.md` (gitignored) holds one-line ideas; delete the line when the idea ships.
 
 ## Invariants and gotchas
 - **An open window owns the keyboard.** `keys::handle` checks `show_info`, `show_changes` and `show_help` before it dispatches on mode, or a popup opened from inside a rename leaves its keys editing the name behind it.
@@ -53,11 +59,11 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 - Errors reaching the user are lowercase, name things in backticks, and say what to do next. A raw OS error is a bug: the terminal check in `main` exists because ratatui otherwise panics with `Os { code: 6 }` when stdout is not a tty.
 
 ## Build / lint / test
-- `cargo build --release`
-- **`cargo clippy-all`** is the lint pass, aliased in `.cargo/config.toml` to `clippy --release --all-targets -- -D warnings`. Use it rather than a bare `cargo clippy`, which skips `tests/` and `examples/` and only warns where the release flow wants a failure.
+- `cargo build --release`, binary at `target/release/vibox`.
+- `cargo clippy-all` is the lint pass, aliased in `.cargo/config.toml` to `clippy --release --all-targets -- -D warnings`; use it rather than a bare `cargo clippy`, which skips `tests/` and `examples/` and only warns where the release flow wants a failure.
+- `cargo test`.
 - Run the release binary against a scratch directory of audio files: `./target/release/vibox <dir>`.
 - `cargo run --example boot -- 5` replays the boot rows (the braille wordmark decoding above the scan progress line) against a made up scan. A warm page cache means a real library almost never takes longer than `GRACE`, so there is otherwise no way to look at them. `tests/boot.rs` asserts the escape codes those rows write.
-- **Do not drive the interface to test it.** Build it, say what changed and what to look at, and let the user run it; they see the screen instantly and an agent driving a pty is slow and wrong about what it looks like. Logic that is not visual (scanning, tag reading, search matching, ex command parsing) can still be checked directly, from `tests/` or an `examples/` binary against the lib.
 - Check the mpris surface while it runs: `busctl --user call org.mpris.MediaPlayer2.vibox /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player PlayPause`, and `busctl --user get-property org.mpris.MediaPlayer2.vibox /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Metadata`.
 
 ## Overview
@@ -66,8 +72,7 @@ module and `src/main.rs` is argv parsing plus the event loop, because a binary
 target cannot be imported: `tests/` and `examples/` can only reach code that
 lives in the lib. Anything worth testing or demonstrating goes in the lib, and
 reaching into the binary through an environment variable is not a substitute.
-
 `vibox` is a Rust TUI music player, AGPL-3.0-only: a jukebox you exit with `:q`. The library is a directory (or an m3u), a track is a file, and the interface is modal in the vi sense: normal, visual, search and ex command modes, vi motions with counts, `/` and `:` on the last screen line, and a two pane layout of folders and tracks. `src/app/` holds all state and the playback queue, `keys.rs` the keymap, `excmd.rs` the `:` commands, `ui.rs` the rendering, `library.rs` the scan and the tag reading, `boot.rs` the rows drawn while it scans, `player.rs` decoding and pulseaudio output, `mpris.rs` the d-bus interface that makes media keys work. Linux only for now; the output layer is the only platform specific part.
 
 ## Self-repair
-If this file contradicts the code, **the code wins** - fix AGENTS.md in the same session you notice.
+If anything here contradicts the code, the code wins; fix AGENTS.md in the same session you notice the drift.

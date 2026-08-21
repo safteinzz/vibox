@@ -12,7 +12,9 @@ repository = "https://gitlab.com/safteinzz/vibox"
 readme = "README.md"
 keywords = ["music", "player", "tui", "vim", "modal"]
 categories = ["command-line-utilities", "multimedia::audio"]
-# working files that are not part of the crate
+# README screenshots are fetched over the network by crates.io via absolute raw
+# URLs, never read out of the package, so shipping them would only bloat every
+# download; the rest are local working files that are not part of the crate.
 exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/", "readme-assets/"]
 
 [dependencies]

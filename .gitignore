@@ -1,8 +1,12 @@
 /target
-/stuffnottocommit
 TODO-LIST.md
+
+# Tool-specific agent pointers (thin @AGENTS.md imports, never committed)
 CLAUDE.md
-/GEMINI.md
-/.cursor/
+GEMINI.md
+.cursor/
 .aider*
-/.windsurfrules
+.windsurfrules
+
+# Local scratch, never part of the crate
+/stuffnottocommit
