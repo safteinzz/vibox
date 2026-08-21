@@ -3,3 +3,8 @@
 # it warns where the release flow wants a failure.
 [alias]
 clippy-all = "clippy --release --all-targets -- -D warnings"
+
+# `cargo +1.89 msrv` is the floor check. The default toolchain is newer than the
+# `rust-version` this crate advertises and accepts code that 1.89 rejects, so only
+# running the older compiler proves the advertised floor is real.
+msrv = "check --all-targets"
