@@ -5,10 +5,11 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 
 ## Hard rules
 - **Commit, push, and publish only when the user says to ship.** They test interactively first; a mid-work commit is never the deliverable.
-- Release flow, in this exact order: bump `version` in `Cargo.toml` **first** → `cargo clippy --release --all-targets` warning-clean + `cargo test` green, which is also what refreshes `Cargo.lock` with the new version → one commit (short conventional message, never co-authored) → `git push origin main` → `cargo publish` (dry-run first; publishing is irreversible) → **tag only after publish succeeds**: `git tag vX.Y.Z && git push origin --tags`. A tag must never point at a version that failed to publish.
+- Release flow, in this exact order: bump `version` in `Cargo.toml` **first** → `cargo clippy-all` clean + `cargo test` green, which is also what refreshes `Cargo.lock` with the new version → one commit (short conventional message, never co-authored) → `git push origin main` → `cargo publish` (dry-run first; publishing is irreversible) → **tag only after publish succeeds**: `git tag vX.Y.Z && git push origin --tags`. A tag must never point at a version that failed to publish.
 - Commit messages: short conventional tags (`feat:`, `fix:`, ...). **Never** add a `Co-Authored-By` trailer.
 - **No em-dashes** anywhere user-facing (README, --help, crate description, commit messages, prose) - they read as AI-generated text.
 - **Never add a dependency that needs a C library, system headers, or an external binary.** `cargo install vibox` must succeed on a bare toolchain; a build that fails on a missing header is a broken product. This is why the audio output is written against the pulseaudio wire protocol instead of using cpal.
+- **The published crate has a lib target, and that lib is not a public API.** The split exists so `tests/` and `examples/` can reach the code, not so anyone can depend on `vibox` as a library. Nothing outside this repo is expected to `use vibox::...`, so a `pub` item moving or changing shape is not a breaking change and does not need a major bump. Do not start treating module paths as a contract.
 - **Test by running `./target/release/vibox` directly. Never `cargo install` to test**, it replaces the binary on PATH with a work-in-progress build; install only when the user asks.
 - **vibox never retags a track, and touches a music folder only in the ways the user asked for:** a rename typed in the edit buffer, and, with `:set danger` on, a move, copy, delete or `:mkdir`. Everything else about a library is read only. The README promises this across three sections (`Rename files in place`, `Nothing is written until :w`, `Danger mode`), so a feature that widens it without widening those is a lie in the documentation as well as a bug.
 - **`danger` never comes back on its own.** It is left out of the session state, which is written automatically on every quit, because it once leaked in there and came back silently every launch: that is the one failure this option must not have. `:mkrc` is the exception and does write it, since it is a command the user typed, and the write says `danger included` on the message row so it is never quiet. Anything else that persists options must follow the `save_state` side of this, not the `:mkrc` side.
@@ -53,13 +54,20 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 
 ## Build / lint / test
 - `cargo build --release`
-- `cargo clippy --release` must be warning-clean before any release.
+- **`cargo clippy-all`** is the lint pass, aliased in `.cargo/config.toml` to `clippy --release --all-targets -- -D warnings`. Use it rather than a bare `cargo clippy`, which skips `tests/` and `examples/` and only warns where the release flow wants a failure.
 - Run the release binary against a scratch directory of audio files: `./target/release/vibox <dir>`.
-- **Do not drive the interface to test it.** Build it, say what changed and what to look at, and let the user run it; they see the screen instantly and an agent driving a pty is slow and wrong about what it looks like. Logic that is not visual (scanning, tag reading, search matching, ex command parsing) can still be checked directly, for example behind a temporary env var branch in `main` that prints results and is removed afterwards.
+- `cargo run --example boot -- 5` replays the boot rows (the braille wordmark decoding above the scan progress line) against a made up scan. A warm page cache means a real library almost never takes longer than `GRACE`, so there is otherwise no way to look at them. `tests/boot.rs` asserts the escape codes those rows write.
+- **Do not drive the interface to test it.** Build it, say what changed and what to look at, and let the user run it; they see the screen instantly and an agent driving a pty is slow and wrong about what it looks like. Logic that is not visual (scanning, tag reading, search matching, ex command parsing) can still be checked directly, from `tests/` or an `examples/` binary against the lib.
 - Check the mpris surface while it runs: `busctl --user call org.mpris.MediaPlayer2.vibox /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player PlayPause`, and `busctl --user get-property org.mpris.MediaPlayer2.vibox /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Metadata`.
 
 ## Overview
-`vibox` is a Rust TUI music player, AGPL-3.0-only: a jukebox you exit with `:q`. The library is a directory (or an m3u), a track is a file, and the interface is modal in the vi sense: normal, visual, search and ex command modes, vi motions with counts, `/` and `:` on the last screen line, and a two pane layout of folders and tracks. `src/app.rs` holds all state and the playback queue, `keys.rs` the keymap, `excmd.rs` the `:` commands, `ui.rs` the rendering, `library.rs` the scan and the tag reading, `player.rs` decoding and pulseaudio output, `mpris.rs` the d-bus interface that makes media keys work. Linux only for now; the output layer is the only platform specific part.
+**The crate is a library with a thin binary on top.** `src/lib.rs` owns every
+module and `src/main.rs` is argv parsing plus the event loop, because a binary
+target cannot be imported: `tests/` and `examples/` can only reach code that
+lives in the lib. Anything worth testing or demonstrating goes in the lib, and
+reaching into the binary through an environment variable is not a substitute.
+
+`vibox` is a Rust TUI music player, AGPL-3.0-only: a jukebox you exit with `:q`. The library is a directory (or an m3u), a track is a file, and the interface is modal in the vi sense: normal, visual, search and ex command modes, vi motions with counts, `/` and `:` on the last screen line, and a two pane layout of folders and tracks. `src/app/` holds all state and the playback queue, `keys.rs` the keymap, `excmd.rs` the `:` commands, `ui.rs` the rendering, `library.rs` the scan and the tag reading, `boot.rs` the rows drawn while it scans, `player.rs` decoding and pulseaudio output, `mpris.rs` the d-bus interface that makes media keys work. Linux only for now; the output layer is the only platform specific part.
 
 ## Self-repair
 If this file contradicts the code, **the code wins** - fix AGENTS.md in the same session you notice.
