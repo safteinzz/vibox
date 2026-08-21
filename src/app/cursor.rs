@@ -1,8 +1,5 @@
 //! Moving the cursor and keeping the view scrolled around it.
 
-
-
-
 use super::*;
 
 impl App {
@@ -65,7 +62,9 @@ impl App {
         let last_visible = (self.top + h - 1).min(self.view.len().saturating_sub(1));
         let row = match where_ {
             'H' => (self.top + SCROLLOFF.min(h / 2)).min(last_visible),
-            'L' => last_visible.saturating_sub(SCROLLOFF.min(h / 2)).max(self.top),
+            'L' => last_visible
+                .saturating_sub(SCROLLOFF.min(h / 2))
+                .max(self.top),
             _ => (self.top + last_visible) / 2,
         };
         self.cur = row;

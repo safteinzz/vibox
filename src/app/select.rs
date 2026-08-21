@@ -1,8 +1,5 @@
 //! Visual mode selection.
 
-
-
-
 use super::*;
 
 impl App {

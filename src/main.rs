@@ -145,5 +145,3 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> Result<()> {
     }
     Ok(())
 }
-
-

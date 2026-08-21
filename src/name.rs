@@ -407,7 +407,11 @@ mod tests {
     fn p_puts_after_the_cursor_and_capital_p_before_it() {
         let mut after = buffer("abc", 1);
         after.paste("XY", true);
-        assert_eq!(after.text(), "abXYc", "p goes after the character under the cursor");
+        assert_eq!(
+            after.text(),
+            "abXYc",
+            "p goes after the character under the cursor"
+        );
 
         let mut before = buffer("abc", 1);
         before.paste("XY", false);
@@ -419,7 +423,11 @@ mod tests {
         let mut buf = buffer("abc", 0);
         buf.paste("XY", true);
         assert_eq!(buf.text(), "aXYbc");
-        assert_eq!(buf.col(), 2, "on the last character put, so a second p does not stack");
+        assert_eq!(
+            buf.col(),
+            2,
+            "on the last character put, so a second p does not stack"
+        );
     }
 
     #[test]
@@ -541,7 +549,10 @@ mod tests {
                 _ => (cut.clear(), probe.clear()),
             };
 
-            assert_eq!(deleted, yanked, "`y{motion}` and `d{motion}` take the same text");
+            assert_eq!(
+                deleted, yanked,
+                "`y{motion}` and `d{motion}` take the same text"
+            );
             assert!(!yanked.is_empty(), "`{motion}` had something to take");
         }
     }
@@ -564,7 +575,11 @@ mod tests {
 
         let mut blank = buffer("   ", 2);
         blank.jump_first_nonblank();
-        assert_eq!(blank.col(), 0, "a name of nothing but spaces holds at the front");
+        assert_eq!(
+            blank.col(),
+            0,
+            "a name of nothing but spaces holds at the front"
+        );
 
         let mut empty = buffer("", 0);
         empty.jump_first_nonblank();
@@ -592,4 +607,3 @@ mod tests {
         assert_eq!(back.col(), 4, "2b is back on `two`");
     }
 }
-

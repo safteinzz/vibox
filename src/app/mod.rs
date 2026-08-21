@@ -8,8 +8,8 @@ use anyhow::Result;
 use crate::library::{self, SortKey, Track};
 use crate::lyrics::Fetcher;
 use crate::matrix::Matrix;
-use crate::name::NameBuffer;
 use crate::mpris::{self, Mpris};
+use crate::name::NameBuffer;
 use crate::player::Audio;
 
 /// Rows kept between the cursor and the edge of the track pane.
@@ -408,8 +408,6 @@ impl App {
         Ok(app)
     }
 
-
-
     pub fn info(&mut self, text: impl Into<String>) {
         self.msg = Some((text.into(), false));
     }
@@ -433,17 +431,17 @@ fn seed() -> u64 {
 // The rest of `impl App`, split by what each part deals with. Several impl
 // blocks for one type are ordinary rust; the split is so a reader can find
 // things, and so each area only reaches what it needs.
-pub mod plan;
-mod scan;
 mod cursor;
-mod undo;
 mod danger;
-mod tabs;
-mod select;
+pub mod plan;
+mod playback;
 mod playlists;
 mod rename;
+mod scan;
 mod search;
-mod playback;
+mod select;
+mod tabs;
+mod undo;
 
 #[cfg(test)]
 mod tests;

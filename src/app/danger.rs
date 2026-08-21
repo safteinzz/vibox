@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-
 use crate::library::{self, Track};
 
 use super::*;
@@ -67,7 +66,9 @@ impl App {
         let mut landed = Vec::with_capacity(n);
         for from in cut {
             self.doomed_files.retain(|p| *p != from);
-            let Some(name) = from.file_name() else { continue };
+            let Some(name) = from.file_name() else {
+                continue;
+            };
             let to = dir.join(name);
             if let Some(track) = self.tracks.iter_mut().find(|t| t.path == from) {
                 track.path = to.clone();
@@ -78,7 +79,10 @@ impl App {
         self.rebuild_view();
         self.gather_at_cursor(&landed);
         let shown = dir.display().to_string();
-        self.info(format!("{n} file{} will move to {shown}, `:w` does it", plural(n)));
+        self.info(format!(
+            "{n} file{} will move to {shown}, `:w` does it",
+            plural(n)
+        ));
         true
     }
 
@@ -89,7 +93,9 @@ impl App {
     /// so `:changes` still lists every file that is about to go.
     pub fn cut_folder(&mut self) {
         if !self.danger {
-            self.error("`dd` on a folder needs `:set danger`; it deletes the folder and its tracks");
+            self.error(
+                "`dd` on a folder needs `:set danger`; it deletes the folder and its tracks",
+            );
             return;
         }
         let Some((label, dir)) = self.folders.get(self.folder_cur.wrapping_sub(1)).cloned() else {
@@ -154,7 +160,9 @@ impl App {
         let mut n = 0;
         let mut landed = Vec::new();
         for from in self.yank.clone() {
-            let Some(name) = from.file_name() else { continue };
+            let Some(name) = from.file_name() else {
+                continue;
+            };
             let to = dir.join(name);
             if to == from {
                 continue;
@@ -182,7 +190,10 @@ impl App {
     /// The folder the view is looking at, which is where a `p` puts files.
     fn current_dir(&self) -> Option<PathBuf> {
         if self.folder_cur > 0 {
-            return self.folders.get(self.folder_cur - 1).map(|(_, p)| p.clone());
+            return self
+                .folders
+                .get(self.folder_cur - 1)
+                .map(|(_, p)| p.clone());
         }
         self.current_track().map(|t| t.dir().to_path_buf())
     }
@@ -311,9 +322,8 @@ impl App {
         }
 
         self.tracks.retain(|t| !gone.contains(&t.path));
-        let follow = |rows: &[usize]| -> Vec<usize> {
-            rows.iter().filter_map(|&i| remap[i]).collect()
-        };
+        let follow =
+            |rows: &[usize]| -> Vec<usize> { rows.iter().filter_map(|&i| remap[i]).collect() };
 
         self.playlist_rows = follow(&self.playlist_rows);
         self.queue = follow(&self.queue);

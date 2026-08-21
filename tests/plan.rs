@@ -116,8 +116,10 @@ fn a_name_freed_by_a_move_in_the_same_write_is_allowed() {
         moves: vec![(p("/m/b.mp3"), p("/m/sub/b.mp3"))],
         ..Wanted::default()
     };
-    assert!(plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err(),
-        "a rename and a move that depend on each other are refused, not guessed at");
+    assert!(
+        plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err(),
+        "a rename and a move that depend on each other are refused, not guessed at"
+    );
 }
 
 #[test]

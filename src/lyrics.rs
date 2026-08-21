@@ -230,9 +230,7 @@ fn runs_over(lines: &[(Duration, String)], ours: u64) -> bool {
     if ours == 0 {
         return false;
     }
-    lines
-        .last()
-        .is_some_and(|(at, _)| at.as_secs() > ours + 5)
+    lines.last().is_some_and(|(at, _)| at.as_secs() > ours + 5)
 }
 
 /// How far a hit's artist or title may be from ours, as a share of the longer
@@ -338,7 +336,8 @@ fn get_json(url: &str) -> Result<serde_json::Value, FetchError> {
         .read_to_string()
         .map_err(|e| FetchError::Other(format!("lrclib: {e}")))
         .and_then(|text| {
-            serde_json::from_str(&text).map_err(|e| FetchError::Other(format!("lrclib sent something unreadable: {e}")))
+            serde_json::from_str(&text)
+                .map_err(|e| FetchError::Other(format!("lrclib sent something unreadable: {e}")))
         })
 }
 

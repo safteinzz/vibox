@@ -115,10 +115,12 @@ fn read_track(path: &Path) -> Track {
     track.track_no = tag.track();
     track.disc_no = tag.disk();
     // Picard writes a full date; only the year is worth a column.
-    track.year = tag
-        .date()
-        .map(|d| u32::from(d.year))
-        .or_else(|| tag.get_string(ItemKey::RecordingDate)?.get(..4)?.parse().ok());
+    track.year = tag.date().map(|d| u32::from(d.year)).or_else(|| {
+        tag.get_string(ItemKey::RecordingDate)?
+            .get(..4)?
+            .parse()
+            .ok()
+    });
 
     track
 }
@@ -372,7 +374,6 @@ pub fn read_m3u(path: &Path) -> Result<Vec<PathBuf>> {
         .map(PathBuf::from)
         .collect())
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -1,8 +1,5 @@
 //! View tabs, each holding its own cursor, scroll and sort.
 
-
-
-
 use super::*;
 
 impl App {
@@ -75,11 +72,14 @@ impl App {
     /// apart and the later `:w` would quietly win.
     pub(super) fn jump_to_open(&mut self, playlist: Option<&str>, folder: usize) -> bool {
         self.tabs[self.tab_idx] = self.snapshot();
-        let found = self.tabs.iter().position(|tab| match (playlist, &tab.playlist) {
-            (Some(name), Some(open)) => open == name,
-            (None, None) => tab.folder == folder,
-            _ => false,
-        });
+        let found = self
+            .tabs
+            .iter()
+            .position(|tab| match (playlist, &tab.playlist) {
+                (Some(name), Some(open)) => open == name,
+                (None, None) => tab.folder == folder,
+                _ => false,
+            });
 
         let Some(i) = found else { return false };
         if i != self.tab_idx {
@@ -96,7 +96,10 @@ impl App {
     pub fn open_in_new_tab(&mut self) {
         let already = match self.tab {
             Tab::Playlists => {
-                let name = self.playlists.get(self.pl_cur).map(|(name, _)| name.clone());
+                let name = self
+                    .playlists
+                    .get(self.pl_cur)
+                    .map(|(name, _)| name.clone());
                 name.is_some_and(|name| self.jump_to_open(Some(&name), 0))
             }
             Tab::Folders => self.jump_to_open(None, self.folder_cur),

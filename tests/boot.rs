@@ -44,7 +44,11 @@ fn the_first_frame_does_not_move_the_cursor_up_into_the_prompt() {
         !text.starts_with("\x1b[2A"),
         "there is nothing above the first frame to go back to"
     );
-    assert_eq!(text.matches('\n').count(), 2, "two wordmark rows, then the progress line");
+    assert_eq!(
+        text.matches('\n').count(),
+        2,
+        "two wordmark rows, then the progress line"
+    );
 }
 
 #[test]
@@ -58,7 +62,12 @@ fn every_later_frame_goes_back_over_the_wordmark_first() {
     assert!(
         later.starts_with("\x1b[2A"),
         "a redraw has to step back over the two wordmark rows, got `{}`",
-        later.escape_debug().to_string().chars().take(40).collect::<String>()
+        later
+            .escape_debug()
+            .to_string()
+            .chars()
+            .take(40)
+            .collect::<String>()
     );
 }
 

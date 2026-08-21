@@ -178,9 +178,7 @@ impl<W: Write + Send> Boot<W> {
         // Walking has no total to count against, so the wordmark sits fully
         // scrambled until the reading phase can say how far along it is.
         let (line, progress) = match scan {
-            library::Scan::Walking(found) => {
-                (format!("scanning `{root}` ... {found} files"), 0.0)
-            }
+            library::Scan::Walking(found) => (format!("scanning `{root}` ... {found} files"), 0.0),
             library::Scan::Reading(_, 0) => return,
             library::Scan::Reading(done, total) => {
                 let pct = done * 100 / total;
@@ -222,4 +220,3 @@ impl<W: Write + Send> Boot<W> {
         }
     }
 }
-

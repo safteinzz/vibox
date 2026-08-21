@@ -101,7 +101,11 @@ pub fn run(app: &mut App, line: &str) {
         "next" | "n" => app.advance(1, false),
         "prev" | "p" | "previous" => app.advance(-1, false),
         "play" => {
-            if app.audio.as_ref().is_some_and(super::player::Audio::is_paused) {
+            if app
+                .audio
+                .as_ref()
+                .is_some_and(super::player::Audio::is_paused)
+            {
                 if let Some(audio) = app.audio.as_ref() {
                     audio.resume();
                 }
@@ -393,7 +397,9 @@ fn mkrc(app: &mut App, bang: bool) {
             let shown = path.display().to_string();
             // Never let danger be written quietly, even when it was asked for.
             if app.danger {
-                app.info(format!("wrote {shown}, danger included: it is on every launch now"));
+                app.info(format!(
+                    "wrote {shown}, danger included: it is on every launch now"
+                ));
             } else {
                 app.info(format!("wrote {shown}"));
             }
@@ -407,13 +413,7 @@ fn mkrc(app: &mut App, bang: bool) {
 
 /// Every `:set` option: the tag columns, plus the panes that can be turned off.
 const OPTIONS: [&str; 7] = [
-    "file",
-    "title",
-    "artist",
-    "album",
-    "lyrics",
-    "karaoke",
-    "danger",
+    "file", "title", "artist", "album", "lyrics", "karaoke", "danger",
 ];
 
 fn option(app: &App, name: &str) -> Option<bool> {
@@ -577,7 +577,6 @@ fn expand(arg: &str) -> PathBuf {
     }
     PathBuf::from(arg)
 }
-
 
 #[cfg(test)]
 mod tests {

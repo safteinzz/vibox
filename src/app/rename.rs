@@ -2,7 +2,6 @@
 
 use std::path::PathBuf;
 
-
 use crate::library::{self};
 use crate::name::NameBuffer;
 
@@ -265,7 +264,9 @@ impl App {
                     // is right here rather than only in the plan: between the
                     // check and now, something else could have taken the name.
                     if new.exists() && new != old {
-                        self.error(format!("`{name}` appeared while writing, nothing else written"));
+                        self.error(format!(
+                            "`{name}` appeared while writing, nothing else written"
+                        ));
                         return;
                     }
                     match std::fs::rename(&old, &new) {
@@ -281,7 +282,9 @@ impl App {
                 Renaming::Folder(old) => {
                     let new = old.with_file_name(&name);
                     if new.exists() && new != old {
-                        self.error(format!("`{name}` appeared while writing, nothing else written"));
+                        self.error(format!(
+                            "`{name}` appeared while writing, nothing else written"
+                        ));
                         return;
                     }
                     if let Err(e) = std::fs::rename(&old, &new) {
@@ -305,7 +308,9 @@ impl App {
                     };
                     let to = dir.join(format!("{name}.m3u"));
                     if to.exists() && *old != name {
-                        self.error(format!("`{name}` appeared while writing, nothing else written"));
+                        self.error(format!(
+                            "`{name}` appeared while writing, nothing else written"
+                        ));
                         return;
                     }
                     if let Err(e) = std::fs::rename(dir.join(format!("{old}.m3u")), &to) {

@@ -39,7 +39,7 @@ Working brief for an AI coding agent, not documentation for people (the README c
 - **`gt` and `gT` act on the focused pane:** the sidebar flips `folders | playlists`, the track pane walks the open view tabs. `h` and `l` are seek keys and must stay that way, which is why tabs never took them.
 - **A playlist is a view over the library, not a new root.** `App::open_playlist` fills `playlist_rows` and leaves `root`, `tracks` and the folders tab alone, so a rewrite that reopens the root on every playlist would break browsing while one is open.
 - **A rename rewrites every playlist that named the file** (`App::repair_playlists`), otherwise a renamed track silently disappears from playlists that reference the old path.
-- **When adding a key:** every binding lives in `keys.rs`. Multi-key sequences go through `app.pending` (one of `g`, `z`, `d`, `y`, `Z`, ctrl-w) and are consumed before counts are read; the `KeyEventKind::Press` filter at the top of `handle` is mandatory, because terminals speaking the kitty protocol also send release events and every motion doubles without it.
+- **When adding a key:** every binding lives under `keys/`, in the file for the mode it belongs to (`normal.rs`, `edit.rs` for a name being renamed, `line.rs` for `:` and `/`, `windows.rs` while a window is up), with the shared vi text helpers in `text.rs` and the dispatch in `mod.rs`. Multi-key sequences go through `app.pending` (one of `g`, `z`, `d`, `y`, `Z`, ctrl-w) and are consumed before counts are read; the `KeyEventKind::Press` filter at the top of `handle` is mandatory, because terminals speaking the kitty protocol also send release events and every motion doubles without it.
 - **When adding a key, do not require a prefix for anything ordinary.** vibox is expected to run inside tmux, so a binding that needs a leader or a `ctrl-b` style chord fights the multiplexer; single presses and vi sequences only.
 - **When touching audio:** `player.rs` runs one thread that owns both the pulseaudio socket and the decoder. The ui sends `Cmd`s over a channel and reads position, paused and finished out of atomics. Never do blocking audio work on the ui thread.
 - **When changing pause:** pause is `CorkPlaybackStream`, and a corked stream gets no `Request` messages from the server, so the thread must block on the command channel and not on the socket; reading the socket while corked deadlocks until the user resumes.
@@ -47,7 +47,7 @@ Working brief for an AI coding agent, not documentation for people (the README c
 - **When touching decoding:** rodio is `default-features = false` with decoder features only. Enabling its `playback` feature pulls in cpal and alsa-sys and breaks the no-system-headers rule.
 - **When reading tags:** a tag that is present but blank counts as absent, otherwise the row renders empty and the file looks missing. The filename without its extension is the fallback and is stored in `Track::file`.
 - **The track list shows `Track::file`, not `Track::title`.** Tags fill the artist and album columns, the statusline and the mpris metadata; the filename is the identity in the list.
-- **When changing the track row:** `ui::columns()` and the header string must stay in agreement, and the fixed width is 10 columns plus whatever `duration_width()` returns (7 once anything in view runs past an hour, 5 otherwise).
+- **When changing the track row** (`ui/tracks.rs`): `columns()` and the header string must stay in agreement, and the fixed width is 10 columns plus whatever `duration_width()` returns (7 once anything in view runs past an hour, 5 otherwise).
 - **When changing the statusline:** only the now-playing segment may stretch. Everything else is fixed width and must be subtracted first, or a large library gets the last digit of its track count clipped.
 - **When changing the layout:** `app.track_h` is written by the renderer every frame and the paging keys depend on it; the sticky header is a separate one row area and must be subtracted from it.
 - **`view` holds indices into `tracks`; `queue` is a snapshot of `view` taken when playback starts.** Filtering or sorting therefore never disturbs what is playing, and code that assumes `queue` matches the current view is wrong.
@@ -73,6 +73,14 @@ module and `src/main.rs` is argv parsing plus the event loop, because a binary
 target cannot be imported: `tests/` and `examples/` can only reach code that
 lives in the lib. Anything worth testing or demonstrating goes in the lib, and
 reaching into the binary through an environment variable is not a substitute.
+Layout:
+- `src/main.rs` - argv parsing, terminal setup and the event loop, nothing else.
+- `src/app/` - all state, split by concern (`playlists`, `rename`, `plan`, `danger`, `scan`, `tabs`, `undo`, `cursor`, `select`, `search`, `playback`), with `mod.rs` owning `App` itself.
+- `src/keys/` - key dispatch in `mod.rs`, then one file per mode plus `text.rs` for the vi text helpers the rename buffer and the command line share.
+- `src/ui/` - rendering split by what is on screen: `folders`, `tracks`, `status`, `popups`, `lyrics`, with `widgets.rs` for pane furniture that knows nothing about the domain and `name_diff.rs` for the character diff a rename shows.
+- Domain modules at the top level: `library`, `player`, `mpris`, `lyrics`, `name`, `excmd`, `boot`, `matrix`, `selfcmd`.
+- There is no `tui/` module: vibox is one interface, so the terminal setup that a multi-screen crate would share lives in `main.rs`.
+
 `vibox` is a Rust TUI music player, AGPL-3.0-only: a jukebox you exit with `:q`. The library is a directory (or an m3u), a track is a file, and the interface is modal in the vi sense: normal, visual, search and ex command modes, vi motions with counts, `/` and `:` on the last screen line, and a two pane layout of folders and tracks. `src/app/` holds all state and the playback queue, `keys.rs` the keymap, `excmd.rs` the `:` commands, `ui.rs` the rendering, `library.rs` the scan and the tag reading, `boot.rs` the rows drawn while it scans, `player.rs` decoding and pulseaudio output, `mpris.rs` the d-bus interface that makes media keys work. Linux only for now; the output layer is the only platform specific part.
 
 ## Self-repair

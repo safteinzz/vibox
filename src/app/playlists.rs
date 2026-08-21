@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-
 use crate::library::{self, Track};
 
 use super::*;
@@ -35,7 +34,10 @@ impl App {
         self.rebuild_view();
         self.goto(at);
         let name = self.playlist_view.clone().unwrap_or_default();
-        self.info(format!("put {n} track{} into `{name}`, `:w` saves", plural(n)));
+        self.info(format!(
+            "put {n} track{} into `{name}`, `:w` saves",
+            plural(n)
+        ));
     }
 
     /// `dd`: drops rows from the open playlist. The files stay on disk.
@@ -171,7 +173,10 @@ impl App {
             let Ok(paths) = library::read_m3u(&path) else {
                 continue;
             };
-            if !paths.iter().any(|p| renamed.iter().any(|(old, _)| old == p)) {
+            if !paths
+                .iter()
+                .any(|p| renamed.iter().any(|(old, _)| old == p))
+            {
                 continue;
             }
 

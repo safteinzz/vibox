@@ -50,7 +50,10 @@ fn update(yes: bool) -> Result<()> {
             println!("\nvibox is up to date");
             Ok(())
         }
-        Ok(status) => bail!("update failed (cargo exited {})", status.code().unwrap_or(1)),
+        Ok(status) => bail!(
+            "update failed (cargo exited {})",
+            status.code().unwrap_or(1)
+        ),
         Err(e) => {
             bail!("could not run cargo: {e} - is it installed and on PATH? (https://rustup.rs)")
         }

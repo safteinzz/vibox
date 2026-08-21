@@ -178,7 +178,9 @@ fn changes_show_playlists_edited_in_another_tab() {
 
     assert!(app.unsaved(), "a change anywhere counts as unsaved");
     assert!(
-        app.pending_changes().iter().any(|line| line.contains("roadtrip")),
+        app.pending_changes()
+            .iter()
+            .any(|line| line.contains("roadtrip")),
         "`:changes` has to list what `:w` would write, in every tab"
     );
 }
@@ -296,7 +298,10 @@ fn renaming_a_folder_is_one_rename_and_the_tracks_follow() {
     app.write_all();
 
     assert!(dir.path().join("Jazz/a.mp3").exists());
-    assert!(dir.path().join("Jazz/live/b.mp3").exists(), "subfolders come too");
+    assert!(
+        dir.path().join("Jazz/live/b.mp3").exists(),
+        "subfolders come too"
+    );
     assert!(!dir.path().join("jazz").exists());
     for track in &app.tracks {
         assert!(track.path.starts_with(dir.path().join("Jazz")));
@@ -331,7 +336,11 @@ fn dd_in_a_playlist_cuts_so_p_can_put_it_back() {
     app.create_playlist("mix");
     app.open_playlist();
     app.paste_into_playlist();
-    let order: Vec<String> = app.view.iter().map(|&i| app.tracks[i].file.clone()).collect();
+    let order: Vec<String> = app
+        .view
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
     assert_eq!(order, ["a", "b", "c"]);
 
     app.cur = 0;
@@ -340,7 +349,11 @@ fn dd_in_a_playlist_cuts_so_p_can_put_it_back() {
 
     app.cur = 1;
     app.paste_into_playlist();
-    let order: Vec<String> = app.view.iter().map(|&i| app.tracks[i].file.clone()).collect();
+    let order: Vec<String> = app
+        .view
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
     assert_eq!(order, ["b", "c", "a"], "dd then p is how a track moves");
 }
 
@@ -416,7 +429,10 @@ fn e_bang_throws_away_every_kind_of_pending_change() {
     app.discard_changes();
 
     assert!(!app.unsaved(), "nothing is waiting any more");
-    assert!(app.pending_changes().is_empty(), "`:changes` comes back empty");
+    assert!(
+        app.pending_changes().is_empty(),
+        "`:changes` comes back empty"
+    );
     assert!(app.renames.is_empty());
     assert!(app.doomed_files.is_empty());
     assert!(!app.playlist_dirty);
@@ -635,16 +651,27 @@ fn a_refused_write_deletes_nothing() {
     app.danger = true;
 
     // mark one for deletion, and rename another onto a name already taken
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "gone").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "gone")
+        .unwrap();
     app.cut_tracks();
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "a")
+        .unwrap();
     app.begin_edit();
     set_name(&mut app, "b");
     app.commit_name();
 
     app.write_all();
 
-    assert!(dir.path().join("gone.mp3").exists(), "a refused write deletes nothing");
+    assert!(
+        dir.path().join("gone.mp3").exists(),
+        "a refused write deletes nothing"
+    );
     assert!(dir.path().join("a.mp3").exists(), "and renames nothing");
     assert!(dir.path().join("b.mp3").exists());
     assert!(app.unsaved(), "it is all still pending");
@@ -657,17 +684,28 @@ fn a_rename_onto_a_song_being_deleted_goes_through() {
     let (mut app, dir) = library(&["keep.mp3", "dupe.mp3"]);
     app.danger = true;
 
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "dupe").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "dupe")
+        .unwrap();
     app.cut_tracks();
 
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "keep").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "keep")
+        .unwrap();
     app.begin_edit();
     set_name(&mut app, "dupe");
     app.commit_name();
 
     app.write_all();
 
-    assert!(dir.path().join("dupe.mp3").exists(), "the name was freed and taken");
+    assert!(
+        dir.path().join("dupe.mp3").exists(),
+        "the name was freed and taken"
+    );
     assert!(!dir.path().join("keep.mp3").exists(), "the rename happened");
     assert_eq!(app.tracks.len(), 1, "one file, not two");
     assert!(!app.unsaved(), "nothing left pending");
@@ -692,7 +730,10 @@ fn a_rename_never_overwrites_a_file_that_is_not_a_track() {
         b"artwork",
         "the file that was already there is untouched"
     );
-    assert!(dir.path().join("song.mp3").exists(), "and the rename did not happen");
+    assert!(
+        dir.path().join("song.mp3").exists(),
+        "and the rename did not happen"
+    );
 }
 
 /// Two rows renamed to the same thing must not leave the second quietly
@@ -729,7 +770,11 @@ fn a_rename_and_a_move_onto_the_same_name_are_refused() {
     app.moves = vec![(root.join("sub/x.mp3"), root.join("x.mp3"))];
 
     // and a rename claiming the same name
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "a")
+        .unwrap();
     app.begin_edit();
     set_name(&mut app, "x");
     app.commit_name();
@@ -751,7 +796,11 @@ fn deleting_a_row_you_renamed_drops_the_rename() {
     let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
     app.danger = true;
 
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "a")
+        .unwrap();
     app.begin_edit();
     set_name(&mut app, "renamed");
     app.commit_name();
@@ -763,8 +812,14 @@ fn deleting_a_row_you_renamed_drops_the_rename() {
     app.write_all();
 
     assert!(!dir.path().join("a.mp3").exists(), "the file is gone");
-    assert!(!dir.path().join("renamed.mp3").exists(), "and was never renamed");
-    assert!(dir.path().join("b.mp3").exists(), "the other one is untouched");
+    assert!(
+        !dir.path().join("renamed.mp3").exists(),
+        "and was never renamed"
+    );
+    assert!(
+        dir.path().join("b.mp3").exists(),
+        "the other one is untouched"
+    );
     assert!(!app.unsaved(), "nothing left pending");
 }
 
@@ -774,18 +829,32 @@ fn deleting_a_row_leaves_other_pending_renames_alone() {
     let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
     app.danger = true;
 
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "a")
+        .unwrap();
     app.begin_edit();
     set_name(&mut app, "renamed");
     app.commit_name();
 
     // delete the other one
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "b").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "b")
+        .unwrap();
     app.cut_tracks();
     app.write_all();
 
-    assert!(dir.path().join("renamed.mp3").exists(), "the rename still happened");
-    assert!(!dir.path().join("b.mp3").exists(), "and the deletion did too");
+    assert!(
+        dir.path().join("renamed.mp3").exists(),
+        "the rename still happened"
+    );
+    assert!(
+        !dir.path().join("b.mp3").exists(),
+        "and the deletion did too"
+    );
 }
 
 /// A folder is the same rule one level up: deleting it drops the renames
@@ -796,7 +865,11 @@ fn deleting_a_folder_drops_the_renames_inside_it() {
     app.danger = true;
 
     // rename a track inside the folder
-    let jazz = app.folders.iter().position(|(label, _)| label == "jazz").unwrap();
+    let jazz = app
+        .folders
+        .iter()
+        .position(|(label, _)| label == "jazz")
+        .unwrap();
     app.folder_cur = jazz + 1;
     app.open_folder();
     app.cur = 0;
@@ -822,7 +895,11 @@ fn deleting_a_folder_drops_the_rename_of_the_folder() {
     let (mut app, dir) = library(&["jazz/a.mp3"]);
     app.danger = true;
 
-    let jazz = app.folders.iter().position(|(label, _)| label == "jazz").unwrap();
+    let jazz = app
+        .folders
+        .iter()
+        .position(|(label, _)| label == "jazz")
+        .unwrap();
     app.folder_cur = jazz + 1;
     app.tab = Tab::Folders;
     app.begin_sidebar_edit();
@@ -835,7 +912,10 @@ fn deleting_a_folder_drops_the_rename_of_the_folder() {
 
     app.write_all();
     assert!(!dir.path().join("jazz").exists());
-    assert!(!dir.path().join("Jazz").exists(), "and it was never renamed on the way out");
+    assert!(
+        !dir.path().join("Jazz").exists(),
+        "and it was never renamed on the way out"
+    );
 }
 
 /// Playlists are the third thing that can be renamed and deleted at once.
@@ -864,7 +944,11 @@ fn undoing_a_deletion_brings_its_rename_back() {
     let (mut app, _dir) = library(&["a.mp3", "b.mp3"]);
     app.danger = true;
 
-    app.cur = app.view.iter().position(|&i| app.tracks[i].file == "a").unwrap();
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "a")
+        .unwrap();
     app.begin_edit();
     set_name(&mut app, "renamed");
     app.commit_name();
@@ -874,6 +958,8 @@ fn undoing_a_deletion_brings_its_rename_back() {
 
     app.undo();
     assert!(app.edit_dirty(), "the rename is pending again");
-    assert!(app.doomed_files.is_empty(), "and nothing is marked for deletion");
+    assert!(
+        app.doomed_files.is_empty(),
+        "and nothing is marked for deletion"
+    );
 }
-

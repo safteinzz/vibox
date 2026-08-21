@@ -66,8 +66,11 @@ pub fn plan(wanted: &Wanted, exists: &dyn Fn(&Path) -> bool) -> Result<Vec<Step>
     vacated.extend(wanted.deletes.iter().cloned());
     let doomed_dirs: Vec<&PathBuf> = wanted.delete_dirs.iter().collect();
 
-    let under_doomed_dir =
-        |path: &Path| doomed_dirs.iter().any(|dir| path.starts_with(dir.as_path()));
+    let under_doomed_dir = |path: &Path| {
+        doomed_dirs
+            .iter()
+            .any(|dir| path.starts_with(dir.as_path()))
+    };
 
     // A source that is being deleted as well as renamed is a contradiction,
     // not a free name: applying both in either order loses one of them.
@@ -189,8 +192,10 @@ fn order(wanted: &Wanted) -> Result<Vec<Step>, Refusal> {
 
 /// A path as the message row should name it: the file, not the whole tree.
 fn name_of(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 impl super::App {

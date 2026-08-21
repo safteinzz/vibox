@@ -78,7 +78,10 @@ pub fn start() -> Result<Mpris> {
     let conn = match serve("org.mpris.MediaPlayer2.vibox", &tx, &status) {
         Ok(conn) => conn,
         Err(_) => serve(
-            &format!("org.mpris.MediaPlayer2.vibox.instance{}", std::process::id()),
+            &format!(
+                "org.mpris.MediaPlayer2.vibox.instance{}",
+                std::process::id()
+            ),
             &tx,
             &status,
         )
@@ -91,10 +94,7 @@ pub fn start() -> Result<Mpris> {
     std::thread::Builder::new()
         .name("vibox-mpris".into())
         .spawn(move || {
-            let Ok(iface) = conn
-                .object_server()
-                .interface::<_, Player>(PATH)
-            else {
+            let Ok(iface) = conn.object_server().interface::<_, Player>(PATH) else {
                 return;
             };
             let mut last = Status::default();
@@ -187,10 +187,16 @@ impl Root {
 
     #[zbus(property)]
     fn supported_mime_types(&self) -> Vec<String> {
-        ["audio/mpeg", "audio/flac", "audio/ogg", "audio/mp4", "audio/wav"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect()
+        [
+            "audio/mpeg",
+            "audio/flac",
+            "audio/ogg",
+            "audio/mp4",
+            "audio/wav",
+        ]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
     }
 }
 

@@ -1,8 +1,5 @@
 //! `/` and `?`, matching against the columns of the row.
 
-
-
-
 use super::*;
 
 impl App {

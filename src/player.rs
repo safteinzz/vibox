@@ -146,7 +146,11 @@ impl Audio {
     }
 
     pub fn toggle_pause(&self) {
-        if self.is_paused() { self.resume() } else { self.pause() }
+        if self.is_paused() {
+            self.resume()
+        } else {
+            self.pause()
+        }
     }
 
     pub fn pause(&self) {

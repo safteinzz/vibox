@@ -3,7 +3,6 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-
 use crate::mpris::{self, Remote};
 use crate::player::Audio;
 
