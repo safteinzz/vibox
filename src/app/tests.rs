@@ -503,3 +503,126 @@ fn undo_takes_back_a_pending_deletion() {
     assert_eq!(app.view.len(), 2, "the row comes back");
     assert!(!app.unsaved());
 }
+
+/// Sorting reorders `tracks`, and `playing`, the queue and a playlist's rows
+/// are all positions in it. A reorder that forgets them repoints the player at
+/// a different song, which is the one thing a sort must never do.
+#[test]
+fn sorting_keeps_every_index_on_the_track_it_pointed_at() {
+    let (mut app, _dir) = library(&["c.mp3", "a.mp3", "b.mp3"]);
+
+    // Set by hand rather than played: a test machine has no audio device, and
+    // these are indices either way.
+    app.queue = (0..app.tracks.len()).collect();
+    app.playlist_rows = vec![2, 0];
+    app.playing = Some(0);
+
+    let playing_before = app.playing_track().map(|t| t.file.clone());
+    let queue_before: Vec<String> = app
+        .queue
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
+    let rows_before: Vec<String> = app
+        .playlist_rows
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
+
+    app.set_sort(SortKey::Title);
+
+    assert_eq!(
+        app.playing_track().map(|t| t.file.clone()),
+        playing_before,
+        "the same song is still the one playing"
+    );
+    let queue_after: Vec<String> = app
+        .queue
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
+    assert_eq!(
+        queue_after, queue_before,
+        "the queue still names the same songs, in the order it snapshotted them"
+    );
+
+    let rows_after: Vec<String> = app
+        .playlist_rows
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
+    assert_eq!(
+        rows_after, rows_before,
+        "a playlist keeps its own order through a sort of the library"
+    );
+}
+
+/// A rename changes where a row belongs in the sort, so `:w` puts the list
+/// back in order instead of leaving it to a manual `:sort`.
+#[test]
+fn writing_a_rename_puts_the_list_back_in_order() {
+    let (mut app, _dir) = library(&["a.mp3", "b.mp3", "c.mp3"]);
+
+    // rename the first row so it sorts last
+    app.cur = 0;
+    app.begin_edit();
+    set_name(&mut app, "zzz");
+    app.commit_name();
+    app.write_all();
+
+    let order: Vec<String> = app
+        .view
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["b".to_string(), "c".to_string(), "zzz".to_string()],
+        "the renamed row moved to where its new name sorts"
+    );
+}
+
+/// A move rewrites paths, and the list is in path order, so left alone the
+/// pasted rows jump to wherever the new name sorts and read as lost. They stay
+/// under the cursor until the next sort or `:w`.
+#[test]
+fn pasted_files_stay_where_they_were_dropped() {
+    let (mut app, _dir) = library(&["aaa.mp3", "mmm.mp3", "zzz/keep.mp3"]);
+    app.danger = true;
+
+    // cut the row that would sort first, then put it in the `zzz` folder
+    app.cur = app
+        .view
+        .iter()
+        .position(|&i| app.tracks[i].file == "aaa")
+        .unwrap();
+    app.cut_tracks();
+
+    let zzz = app
+        .folders
+        .iter()
+        .position(|(label, _)| label.contains("zzz"))
+        .unwrap();
+    app.folder_cur = zzz + 1;
+    app.open_folder();
+
+    // land on `keep`, then put
+    app.cur = 0;
+    assert!(app.move_cut_here(), "the cut is put into this folder");
+
+    let names: Vec<String> = app
+        .view
+        .iter()
+        .map(|&i| app.tracks[i].file.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["aaa".to_string(), "keep".to_string()],
+        "the pasted row is at the cursor, not sorted away to the end"
+    );
+
+    // and a sort is what puts it back in order
+    app.set_sort(SortKey::Path);
+    assert_eq!(app.moves.len(), 1, "the move is still only pending");
+}
+

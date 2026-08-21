@@ -63,8 +63,132 @@ impl App {
 
     pub fn set_sort(&mut self, key: SortKey) {
         self.sort_key = key;
+        self.resort();
+    }
+
+    /// Rearranges `tracks` into `order`, taking every index that points into
+    /// it along.
+    ///
+    /// `order[i]` is where the track that ends up at row `i` is now. Same
+    /// bookkeeping as `resort`, which is the other thing allowed to move rows
+    /// around.
+    pub(super) fn reorder(&mut self, order: &[usize]) {
+        if order.len() != self.tracks.len() {
+            return;
+        }
         let under_cursor = self.current_track().map(|t| t.path.clone());
-        library::sort(&mut self.tracks, key);
+
+        let mut remap = vec![0; order.len()];
+        for (to, &from) in order.iter().enumerate() {
+            remap[from] = to;
+        }
+
+        let mut taken: Vec<Option<Track>> = self.tracks.drain(..).map(Some).collect();
+        self.tracks = order
+            .iter()
+            .filter_map(|&from| taken[from].take())
+            .collect();
+
+        self.playlist_rows = self.playlist_rows.iter().map(|&i| remap[i]).collect();
+        self.queue = self.queue.iter().map(|&i| remap[i]).collect();
+        self.playing = self.playing.map(|i| remap[i]);
+        for tab in &mut self.tabs {
+            tab.rows = tab.rows.iter().map(|&i| remap[i]).collect();
+        }
+
+        self.rebuild_view();
+        if let Some(path) = under_cursor
+            && let Some(pos) = self.view.iter().position(|&i| self.tracks[i].path == path)
+        {
+            self.cur = pos;
+        }
+        self.clamp();
+    }
+
+    /// Puts `moved` back next to the cursor, where they were just dropped.
+    ///
+    /// A move rewrites each track's path, and the list is in path order, so
+    /// left alone the rows jump to wherever the new name sorts, which reads as
+    /// "they vanished". They stay put until the next sort or `:w`.
+    pub(super) fn gather_at_cursor(&mut self, moved: &[std::path::PathBuf]) {
+        if moved.is_empty() {
+            return;
+        }
+        let is_moved: Vec<bool> = self
+            .tracks
+            .iter()
+            .map(|t| moved.contains(&t.path))
+            .collect();
+
+        // Where they go: in front of the row the cursor is on, or where that
+        // row was if the cursor was sitting on one of the moved tracks.
+        let anchor = self.view.get(self.cur).copied();
+
+        let just_moved: Vec<usize> = is_moved
+            .iter()
+            .enumerate()
+            .filter_map(|(i, moved)| moved.then_some(i))
+            .collect();
+
+        let mut order = Vec::with_capacity(self.tracks.len());
+        let mut placed = false;
+        for (i, moved) in is_moved.iter().enumerate() {
+            if Some(i) == anchor && !placed {
+                order.extend_from_slice(&just_moved);
+                placed = true;
+            }
+            if !moved {
+                order.push(i);
+            }
+        }
+        if !placed {
+            order.extend_from_slice(&just_moved);
+        }
+
+        self.reorder(&order);
+    }
+
+    /// Sorts the library again, taking everything that points into it along.
+    ///
+    /// `queue`, `playing`, `playlist_rows` and each tab's rows are positions
+    /// in `tracks`, so reordering the vec on its own silently repoints all of
+    /// them at other songs. This is the same bookkeeping `forget_tracks` does
+    /// for a deletion, and every reorder needs it.
+    pub(super) fn resort(&mut self) {
+        let under_cursor = self.current_track().map(|t| t.path.clone());
+
+        let before: Vec<PathBuf> = self.tracks.iter().map(|t| t.path.clone()).collect();
+        library::sort(&mut self.tracks, self.sort_key);
+
+        // Where each track ended up. Paths are unique, which is what makes
+        // this a safe way to reuse `library::sort` rather than repeating its
+        // comparison here.
+        let now: std::collections::HashMap<&Path, usize> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.path.as_path(), i))
+            .collect();
+        let Some(remap) = before
+            .iter()
+            .map(|p| now.get(p.as_path()).copied())
+            .collect::<Option<Vec<usize>>>()
+        else {
+            // Two tracks sharing a path would make the mapping ambiguous.
+            // Nothing should produce that, and guessing is worse than leaving
+            // the indices as they are.
+            self.rebuild_view();
+            self.clamp();
+            return;
+        };
+
+        self.playlist_rows = self.playlist_rows.iter().map(|&i| remap[i]).collect();
+        self.queue = self.queue.iter().map(|&i| remap[i]).collect();
+        self.playing = self.playing.map(|i| remap[i]);
+        for tab in &mut self.tabs {
+            tab.rows = tab.rows.iter().map(|&i| remap[i]).collect();
+        }
+
         self.rebuild_view();
         if let Some(path) = under_cursor
             && let Some(pos) = self.view.iter().position(|&i| self.tracks[i].path == path)

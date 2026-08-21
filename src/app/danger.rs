@@ -60,6 +60,7 @@ impl App {
         self.checkpoint();
         let cut = std::mem::take(&mut self.cut);
         let n = cut.len();
+        let mut landed = Vec::with_capacity(n);
         for from in cut {
             self.doomed_files.retain(|p| *p != from);
             let Some(name) = from.file_name() else { continue };
@@ -67,9 +68,11 @@ impl App {
             if let Some(track) = self.tracks.iter_mut().find(|t| t.path == from) {
                 track.path = to.clone();
             }
+            landed.push(to.clone());
             self.moves.push((from, to));
         }
         self.rebuild_view();
+        self.gather_at_cursor(&landed);
         let shown = dir.display().to_string();
         self.info(format!("{n} file{} will move to {shown}, `:w` does it", plural(n)));
         true
@@ -140,6 +143,7 @@ impl App {
 
         self.checkpoint();
         let mut n = 0;
+        let mut landed = Vec::new();
         for from in self.yank.clone() {
             let Some(name) = from.file_name() else { continue };
             let to = dir.join(name);
@@ -151,11 +155,13 @@ impl App {
                 copy.path = to.clone();
                 self.tracks.push(copy);
             }
+            landed.push(to.clone());
             self.copies.push((from, to));
             n += 1;
         }
 
         self.rebuild_view();
+        self.gather_at_cursor(&landed);
         let shown = self.under_root(&dir);
         self.info(format!(
             "{n} file{} will be copied to {shown}, `:w` does it",

@@ -387,6 +387,24 @@ impl App {
                 }
             }
         }
+
+        // A rename or a move changes where a row belongs in the sort, and a
+        // move changes which folders exist. Put the list back in order here
+        // rather than making the user follow every `:w` with a `:sort`.
+        //
+        // Deliberately not a rescan: `reload` throws away `playing` and the
+        // queue, and the names on disk already match what is in memory, so
+        // there is nothing to read back.
+        if renames || moved + copied + removed > 0 {
+            self.resort();
+            let base = if self.root.is_dir() {
+                self.root.clone()
+            } else {
+                self.root.parent().unwrap_or(&self.root).to_path_buf()
+            };
+            self.folders = library::folders(&self.tracks, &base);
+            self.folder_cur = self.folder_cur.min(self.folders.len());
+        }
     }
 
     /// Writes the open playlist back over its own file.
