@@ -51,6 +51,7 @@ fn window_key(app: &mut App, key: KeyEvent) {
     // The changes window pans sideways: a rename of two long paths is wider
     // than any popup, and the interesting part is usually the far end.
     if app.show_changes {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let step = app.count.take().unwrap_or(1) * 4;
         match key.code {
             KeyCode::Char('l') | KeyCode::Right => app.changes_pan += step,
@@ -59,9 +60,27 @@ fn window_key(app: &mut App, key: KeyEvent) {
             }
             KeyCode::Char('0') => app.changes_pan = 0,
             KeyCode::Char('$') => app.changes_pan = usize::MAX,
+            // The whole list, not the row under a cursor: there is no cursor
+            // here, and what you want to paste elsewhere is all of it.
+            KeyCode::Char('y') => {
+                let text = app.pending_changes().join("\n");
+                app.copy_to_clipboard(&text);
+                app.show_changes = false;
+            }
+            // A big batch outgrows any popup, so it scrolls like the history
+            // window does.
+            KeyCode::Char('j') | KeyCode::Down => app.changes_top += step / 4,
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.changes_top = app.changes_top.saturating_sub(step / 4);
+            }
+            KeyCode::Char('g') | KeyCode::Home => app.changes_top = 0,
+            KeyCode::Char('G') | KeyCode::End => app.changes_top = usize::MAX,
+            KeyCode::Char('d') if ctrl => app.changes_top += 10,
+            KeyCode::Char('u') if ctrl => app.changes_top = app.changes_top.saturating_sub(10),
             KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter => {
                 app.show_changes = false;
                 app.changes_pan = 0;
+                app.changes_top = 0;
             }
             _ => {}
         }

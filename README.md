@@ -14,6 +14,7 @@ a jukebox you exit with :q - a cli music player with vi motions, ex commands, an
 cargo install vibox   # that is the whole install: no system libraries, no headers
 vibox ~/Music         # or just `vibox`, for your music directory
 vibox rotation.m3u    # a playlist is a library too
+vibox self update     # reinstall the latest release later on
 ```
 
 Every dependency is pure rust, so the install cannot fail on a missing C header.
@@ -45,13 +46,19 @@ Every name is checked before any rename runs, and tags are never modified.
 
 ## Nothing is written until `:w`
 
-![A popup headed `:w would do this` listing two renames from old filename to new and two deletions in red, over the track list](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/changes.png)
+![The `:changes` view filling the window: a verb column of renames, a move and a delete, then two columns of paths side by side, with only the characters that differ blocked out in red on the left and green on the right](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/diff.png)
 
 Renames, playlist edits, cuts and deletions all sit in memory until you write
-them. `:changes` lists exactly what `:w` would do, `u` and `ctrl-r` walk them,
-`:e!` throws the lot away, and `:q` refuses while anything is pending. A batch is
-all or nothing, so one name that already exists stops the whole write rather
-than half applying it.
+them. `:changes` shows exactly what `:w` would do, as a diff: the old name on
+the left, the new one on the right, and only the characters that actually
+change are marked, so a stray `(Lyrics)` or a swapped apostrophe is visible
+without reading both paths. `u` and `ctrl-r` walk the pending set, `:e!` throws
+the lot away, and `:q` refuses while anything is waiting.
+
+The whole batch is planned against the disk before a byte is written, so a name
+that already exists, two files heading for the same name, or a rename that
+would land on something else stops the entire write with everything still
+pending. Nothing is ever half applied.
 
 ## Playlists
 

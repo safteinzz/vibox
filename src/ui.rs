@@ -16,6 +16,8 @@ use crate::app::{App, Mode, Pane, Renaming, Tab};
 use crate::library::fmt_duration;
 
 const FOLDER_W: u16 = 30;
+/// Width of the verb column in `:changes`: `renamed`, `deleted`, `save`.
+const VERB: usize = 8;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [main, progress, status, cmdline] = Layout::vertical([
@@ -204,45 +206,240 @@ fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
 /// to see.
 fn draw_changes(frame: &mut Frame, app: &mut App, area: Rect) {
     let changes = app.pending_changes();
-    let widest = changes.iter().map(|line| line.width()).max().unwrap_or(0);
 
-    let w = 88.min(area.width.saturating_sub(4));
-    let h = (changes.len().max(1) as u16 + 2).min(area.height.saturating_sub(2));
-    let popup = Rect {
-        x: (area.width.saturating_sub(w)) / 2,
-        y: (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
+    // The whole window, not a popup floating over the track list. Two long
+    // paths side by side need the width, and every row here is a change, so
+    // there is nothing underneath worth keeping in view.
+    let block = Block::bordered()
+        .title(" :w would do this, j k scroll, y copies, q closes ");
+    let inner = block.inner(area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
 
-    let block = Block::bordered().title(" :w would do this, q closes ");
-    let inner = block.inner(popup);
-    let view_w = inner.width as usize;
-    app.changes_pan = app.changes_pan.min(widest.saturating_sub(view_w));
+    if changes.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(" nothing to write", dim())),
+            inner,
+        );
+        return;
+    }
+
+    // A gutter for the verb, then the two sides of the diff with a divider
+    // between them, the way vimdiff splits a window.
+    let [gutter, before, divider, after] = Layout::horizontal([
+        Constraint::Length(VERB as u16 + 1),
+        Constraint::Min(10),
+        Constraint::Length(1),
+        Constraint::Min(10),
+    ])
+    .areas(inner);
+
+    let rows = inner.height as usize;
+    app.changes_top = app.changes_top.min(changes.len().saturating_sub(rows));
+    let top = app.changes_top;
+
+    // Both columns pan together, so a path longer than half the window can
+    // still be read to its end without the two sides sliding apart.
+    let widest = changes
+        .iter()
+        .map(|line| {
+            let (_, old, new) = split_change(line);
+            old.chars().count().max(new.map_or(0, |n| n.chars().count()))
+        })
+        .max()
+        .unwrap_or(0);
+    let column = before.width as usize;
+    app.changes_pan = app.changes_pan.min(widest.saturating_sub(column));
     let pan = app.changes_pan;
 
-    let body: Vec<Line> = if changes.is_empty() {
-        vec![Line::styled(" nothing to write", dim())]
-    } else {
-        changes
-            .iter()
-            .map(|line| {
-                let shown: String = line.chars().skip(pan).collect();
-                Line::styled(format!(" {shown}"), change_style(line))
-            })
-            .collect()
-    };
+    let shown = changes.iter().skip(top).take(rows);
 
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-    frame.render_widget(Paragraph::new(body), inner);
+    let (mut verbs, mut olds, mut news) = (Vec::new(), Vec::new(), Vec::new());
+    for line in shown {
+        let (verb, old, new) = split_change(line);
+        verbs.push(Line::styled(format!(" {verb}"), change_style(line)));
+        match new {
+            // A rename: what goes on the left, what arrives on the right, and
+            // only the characters that differ are marked.
+            Some(new) => {
+                let (kept_old, kept_new) = common(&chars_of(&old), &chars_of(&new));
+                olds.push(marked(&old, &kept_old, Color::Red, pan));
+                news.push(marked(&new, &kept_new, Color::Green, pan));
+            }
+            // A save or a delete names one thing, so it just sits on the left.
+            None => {
+                olds.push(Line::styled(
+                    old.chars().skip(pan).collect::<String>(),
+                    change_style(line),
+                ));
+                news.push(Line::raw(""));
+            }
+        }
+    }
 
-    if widest > view_w {
-        draw_hscrollbar(frame, popup, widest, pan, view_w);
+    frame.render_widget(Paragraph::new(verbs), gutter);
+    frame.render_widget(Paragraph::new(olds), before);
+    frame.render_widget(
+        Paragraph::new(vec![Line::styled("│", dim()); rows]),
+        divider,
+    );
+    frame.render_widget(Paragraph::new(news), after);
+
+    if changes.len() > rows {
+        draw_vscrollbar(frame, area, changes.len(), top, rows);
+    }
+    if widest > column {
+        draw_hscrollbar(frame, area, widest, pan, column);
     }
 }
 
-/// Colour by what the line would do: green makes something, blue moves or
+/// A change line split into its verb, the name that goes, and the name that
+/// arrives if there is one.
+fn split_change(line: &str) -> (String, String, Option<String>) {
+    const ARROW: &str = "  ->  ";
+    let verb: String = line.chars().take(VERB).collect();
+    let rest: String = line.chars().skip(VERB).collect();
+    match rest.split_once(ARROW) {
+        Some((from, to)) => (
+            verb.trim_end().to_string(),
+            from.to_string(),
+            Some(to.to_string()),
+        ),
+        None => (verb.trim_end().to_string(), rest, None),
+    }
+}
+
+/// A name with the characters that changed blocked out, the rest plain.
+fn marked(text: &str, kept: &[bool], changed: Color, pan: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, ch) in text.chars().enumerate().skip(pan) {
+        let style = if kept.get(i).copied().unwrap_or(false) {
+            Style::default()
+        } else {
+            Style::default()
+                .bg(changed)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        };
+        match spans.last_mut() {
+            Some(Span { content, style: last }) if *last == style => {
+                content.to_mut().push(ch);
+            }
+            _ => spans.push(Span::styled(ch.to_string(), style)),
+        }
+    }
+    Line::from(spans)
+}
+
+fn chars_of(s: &str) -> Vec<char> {
+    s.chars().collect()
+}
+
+/// How many characters must agree in a row before a match means anything.
+const MIN_ANCHOR: usize = 4;
+/// Longest pair worth the quadratic search for an anchor.
+const ANCHOR_LIMIT: usize = 512;
+
+/// Which characters of each name survive into the other.
+///
+/// Trims the shared start and end, then anchors on the longest run the two
+/// middles still share and recurses either side of it, so two edits to one
+/// name stay two marks with the untouched text between them left alone.
+///
+/// Deliberately not a longest common subsequence. An LCS matches a
+/// *subsequence*, so scattered characters count: renaming `Ode To Felix
+/// (Ikerya Project Remix)` to `Ode To *testing edits* Felix` let it pair the
+/// `ix` of the new `Felix` with the `ix` of the old `Remix`, and `Fel` read as
+/// invented text. An anchor is a *substring*: contiguous, and at least
+/// `MIN_ANCHOR` long, so a two character coincidence can never become one.
+///
+/// Two names with nothing in common need no special case: no anchor clears the
+/// threshold, so both print as one solid block, which is exactly "this became
+/// that".
+fn common(old: &[char], new: &[char]) -> (Vec<bool>, Vec<bool>) {
+    let mut kept_old = vec![false; old.len()];
+    let mut kept_new = vec![false; new.len()];
+    align(old, new, 0, 0, &mut kept_old, &mut kept_new);
+    (kept_old, kept_new)
+}
+
+/// Marks what `old` and `new` share, writing into the masks at the offsets the
+/// two slices sit at in the whole name.
+fn align(
+    old: &[char],
+    new: &[char],
+    at_old: usize,
+    at_new: usize,
+    kept_old: &mut [bool],
+    kept_new: &mut [bool],
+) {
+    let (n, m) = (old.len(), new.len());
+    let most = n.min(m);
+
+    let head = (0..most).take_while(|&i| old[i] == new[i]).count();
+    // The tail may not eat into the head: with nothing between them there is
+    // no change left to show.
+    let tail = (0..most - head)
+        .take_while(|&k| old[n - 1 - k] == new[m - 1 - k])
+        .count();
+
+    kept_old[at_old..at_old + head].fill(true);
+    kept_new[at_new..at_new + head].fill(true);
+    kept_old[at_old + n - tail..at_old + n].fill(true);
+    kept_new[at_new + m - tail..at_new + m].fill(true);
+
+    let (old_mid, new_mid) = (&old[head..n - tail], &new[head..m - tail]);
+    if old_mid.is_empty() || new_mid.is_empty() {
+        return;
+    }
+
+    // What is left is a change on both sides unless they still share a run
+    // long enough to mean something, in which case it is really two changes
+    // with untouched text between them.
+    let Some((o, e, len)) = anchor(old_mid, new_mid) else {
+        return;
+    };
+
+    let (o_at, n_at) = (at_old + head, at_new + head);
+    align(&old_mid[..o], &new_mid[..e], o_at, n_at, kept_old, kept_new);
+    kept_old[o_at + o..o_at + o + len].fill(true);
+    kept_new[n_at + e..n_at + e + len].fill(true);
+    align(
+        &old_mid[o + len..],
+        &new_mid[e + len..],
+        o_at + o + len,
+        n_at + e + len,
+        kept_old,
+        kept_new,
+    );
+}
+
+/// The longest run of characters the two share, if it is long enough to be
+/// worth trusting: where it starts in each, and how long it is.
+fn anchor(old: &[char], new: &[char]) -> Option<(usize, usize, usize)> {
+    if old.len() > ANCHOR_LIMIT || new.len() > ANCHOR_LIMIT {
+        return None;
+    }
+
+    let mut prev = vec![0usize; new.len() + 1];
+    let mut best = (0, 0, 0);
+    for (i, o) in old.iter().enumerate() {
+        let mut row = vec![0usize; new.len() + 1];
+        for (j, e) in new.iter().enumerate() {
+            if o == e {
+                row[j + 1] = prev[j] + 1;
+                if row[j + 1] > best.2 {
+                    best = (i + 1 - row[j + 1], j + 1 - row[j + 1], row[j + 1]);
+                }
+            }
+        }
+        prev = row;
+    }
+
+    (best.2 >= MIN_ANCHOR).then_some(best)
+}
+
+/// Colour by what the line would do:/// Colour by what the line would do:/// Colour by what the line would do: green makes something, blue moves or
 /// renames it, red takes it away.
 fn change_style(line: &str) -> Style {
     let colour = match line.split_whitespace().next() {
@@ -255,6 +452,43 @@ fn change_style(line: &str) -> Style {
 }
 
 /// A thumb along the bottom border showing how much is off to the sides.
+/// The same down the right border, for a list taller than the popup.
+///
+/// Without it a batch that scrolls looks like a batch that is simply cut off,
+/// which is the wrong thing to believe about a list of things `:w` will do.
+fn draw_vscrollbar(frame: &mut Frame, popup: Rect, total: usize, top: usize, view: usize) {
+    let track = popup.height.saturating_sub(2) as usize;
+    if track == 0 || total == 0 {
+        return;
+    }
+
+    let thumb = (track * view / total).max(1).min(track);
+    let at = if total > view {
+        (track - thumb) * top / (total - view)
+    } else {
+        0
+    };
+
+    let column: Vec<Line> = (0..track)
+        .map(|cell| {
+            let glyph = if cell >= at && cell < at + thumb {
+                "┃"
+            } else {
+                "│"
+            };
+            Line::styled(glyph, Style::default().fg(Color::Cyan))
+        })
+        .collect();
+
+    let area = Rect {
+        x: popup.x + popup.width.saturating_sub(1),
+        y: popup.y + 1,
+        width: 1,
+        height: track as u16,
+    };
+    frame.render_widget(Paragraph::new(column), area);
+}
+
 fn draw_hscrollbar(frame: &mut Frame, popup: Rect, total: usize, pan: usize, view: usize) {
     let track = popup.width.saturating_sub(2) as usize;
     if track == 0 || total == 0 {
