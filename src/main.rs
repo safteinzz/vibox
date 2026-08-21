@@ -68,20 +68,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Update vibox to the latest release
-    ///   -y          skip the confirmation prompt
-    #[command(verbatim_doc_comment)]
-    Update {
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-    },
+    /// Manage vibox itself: `self update` reinstalls, `self check` looks for a newer release
+    #[command(name = "self", subcommand)]
+    Selfie(vibox::selfcmd::Cmd),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if let Some(Cmd::Update { yes }) = cli.cmd {
-        return cmd_update(yes);
+    if let Some(Cmd::Selfie(cmd)) = cli.cmd {
+        return vibox::selfcmd::run(cmd);
     }
 
     let Some(sort) = SortKey::parse(&cli.sort) else {
@@ -151,34 +147,3 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> Result<()> {
 }
 
 
-/// `vibox update`: reinstall the latest release with
-/// `cargo install vibox --force`. Prompts first unless `-y`.
-fn cmd_update(yes: bool) -> Result<()> {
-    use std::io::Write;
-
-    if !yes {
-        print!("Update vibox to the latest release via cargo? [y/N] ");
-        std::io::stdout().flush().ok();
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).ok();
-        if !matches!(input.trim().to_lowercase().as_str(), "y" | "yes") {
-            println!("aborted");
-            return Ok(());
-        }
-    }
-
-    println!("updating via cargo install vibox --force\n");
-    match std::process::Command::new("cargo")
-        .args(["install", "vibox", "--force"])
-        .status()
-    {
-        Ok(status) if status.success() => {
-            println!("\nvibox is up to date");
-            Ok(())
-        }
-        Ok(status) => bail!("update failed (cargo exited {})", status.code().unwrap_or(1)),
-        Err(e) => {
-            bail!("could not run cargo: {e} - is it installed and on PATH? (https://rustup.rs)")
-        }
-    }
-}
