@@ -8,5 +8,5 @@ GEMINI.md
 .aider*
 .windsurfrules
 
-# Local scratch, never part of the crate
-/stuffnottocommit
+# Private reference material, never committed - see AGENTS.md
+/.nocommit
