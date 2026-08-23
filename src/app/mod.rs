@@ -286,6 +286,10 @@ pub struct App {
     pub qpos: usize,
     /// Queue positions already played, so shuffle can go back the way it came.
     history: Vec<usize>,
+    /// Queue positions shuffle has not played yet this cycle. Refilled, minus
+    /// whatever is currently playing, once it runs dry, so every track is
+    /// heard once before any of them repeat.
+    shuffle_bag: Vec<usize>,
     pub playing: Option<usize>,
     pub repeat: Repeat,
     pub shuffle: bool,
@@ -379,6 +383,7 @@ impl App {
             queue: Vec::new(),
             qpos: 0,
             history: Vec::new(),
+            shuffle_bag: Vec::new(),
             playing: None,
             repeat: Repeat::Off,
             shuffle: false,

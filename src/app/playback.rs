@@ -18,6 +18,7 @@ impl App {
         self.queue = self.view.clone();
         self.qpos = self.cur;
         self.history.clear();
+        self.shuffle_bag.clear();
         self.play_queue_pos();
     }
 
@@ -225,12 +226,24 @@ impl App {
         self.audio.as_ref().map_or(Duration::ZERO, Audio::pos)
     }
 
+    /// Draws from a bag of not-yet-played queue positions, so shuffle covers
+    /// every track once before any of them repeat. The bag is refilled, minus
+    /// the track that is about to become "previous", whenever it runs dry.
     fn next_random(&mut self) -> usize {
+        if self.shuffle_bag.is_empty() {
+            self.shuffle_bag = (0..self.queue.len()).filter(|&p| p != self.qpos).collect();
+        }
+        if self.shuffle_bag.is_empty() {
+            // Nothing but the track already playing: it is the only option.
+            return self.qpos;
+        }
+
         // xorshift64: a shuffle order does not need a crate.
         self.rng ^= self.rng << 13;
         self.rng ^= self.rng >> 7;
         self.rng ^= self.rng << 17;
-        (self.rng % self.queue.len() as u64) as usize
+        let idx = (self.rng % self.shuffle_bag.len() as u64) as usize;
+        self.shuffle_bag.swap_remove(idx)
     }
 
     /// Copies text to the system clipboard with OSC 52, the escape sequence

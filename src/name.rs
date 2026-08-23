@@ -180,6 +180,15 @@ impl NameBuffer {
         }
     }
 
+    /// `dh`/`ch`: backspace, but yanks what it took like every other delete.
+    pub fn delete_back(&mut self) -> String {
+        if self.col == 0 {
+            return String::new();
+        }
+        self.col -= 1;
+        self.text.remove(self.col).to_string()
+    }
+
     /// `x`, and Delete in insert: takes the character under the cursor.
     ///
     /// Every delete returns what it removed, because in vi a delete is also a

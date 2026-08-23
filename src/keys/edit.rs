@@ -92,7 +92,7 @@ pub(super) fn edit_mode(app: &mut App, key: KeyEvent) {
     // Anything that changes the text is undoable on its own.
     if matches!(
         key.code,
-        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'x' | 'D' | 'C' | 'S' | 'c' | 'd' | 'p' | 'P')
+        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'x' | 'D' | 'C' | 'S' | 's' | 'c' | 'd' | 'p' | 'P')
             | KeyCode::Delete
     ) {
         app.checkpoint();
@@ -100,7 +100,7 @@ pub(super) fn edit_mode(app: &mut App, key: KeyEvent) {
 
     let insert = matches!(
         key.code,
-        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'C' | 'S' | 'c')
+        KeyCode::Char('i' | 'a' | 'I' | 'A' | 'C' | 'S' | 's' | 'c')
     );
     let register = app.name_reg.clone();
     let count = app.count.take().unwrap_or(1);
@@ -125,7 +125,11 @@ pub(super) fn edit_mode(app: &mut App, key: KeyEvent) {
         // vi's `I` inserts at the first non-blank, not at column zero.
         KeyCode::Char('I') => buf.jump_first_nonblank(),
         KeyCode::Char('A') => buf.append_at_end(),
-        KeyCode::Char('x') | KeyCode::Delete => taken = Some(gather(count, || buf.delete_here())),
+        // `s` substitutes the character(s) under the cursor: same take as `x`,
+        // but it drops into insert like `cl` does.
+        KeyCode::Char('x' | 's') | KeyCode::Delete => {
+            taken = Some(gather(count, || buf.delete_here()));
+        }
         KeyCode::Char('D') => taken = Some(buf.truncate_here()),
         KeyCode::Char('C') => taken = Some(buf.truncate_here()),
         KeyCode::Char('S') => taken = Some(buf.clear()),
@@ -204,6 +208,8 @@ pub(super) fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
             buf.delete_word(op == 'c' || key.code == KeyCode::Char('e'))
         }),
         (_, KeyCode::Char('b')) => gather(count, || buf.delete_word_back()),
+        (_, KeyCode::Char('l')) => gather(count, || buf.delete_here()),
+        (_, KeyCode::Char('h')) => gather(count, || buf.delete_back()),
         (_, KeyCode::Char('$')) => buf.truncate_here(),
         _ => return,
     };

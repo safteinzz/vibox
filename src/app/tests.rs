@@ -382,6 +382,42 @@ fn deleting_a_playlist_leaves_every_track_alone() {
 }
 
 #[test]
+fn shuffle_plays_every_track_once_before_any_repeat() {
+    let (mut app, _dir) = library(&["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
+    app.shuffle = true;
+    app.queue = app.view.clone();
+    app.qpos = 0;
+    app.history.clear();
+
+    // One track is already "playing" (qpos), so the rest of the queue takes
+    // exactly len - 1 advances to cover.
+    let mut heard = std::collections::HashSet::new();
+    for _ in 0..app.queue.len() - 1 {
+        app.advance(1, false);
+        heard.insert(app.qpos);
+    }
+
+    assert_eq!(
+        heard.len(),
+        app.queue.len() - 1,
+        "no track played twice in one cycle"
+    );
+    assert!(
+        !heard.contains(&0),
+        "the starting track did not come back early"
+    );
+
+    // The cycle is exhausted, so this advance starts a new one - it must not
+    // immediately replay the track that is wrapping up.
+    let last = app.qpos;
+    app.advance(1, false);
+    assert_ne!(
+        app.qpos, last,
+        "a new cycle does not repeat straight across the seam"
+    );
+}
+
+#[test]
 fn shuffle_goes_back_to_what_was_actually_played() {
     let (mut app, _dir) = library(&["a.mp3", "b.mp3", "c.mp3", "d.mp3", "e.mp3"]);
     app.shuffle = true;
