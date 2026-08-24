@@ -10,12 +10,11 @@
 #   ./stage.sh down   delete the stage
 #
 # Every band, album, track and lyric below is made up, and every audio file is
-# the same two-note drone encoded by ffmpeg with the tags written in. There is
-# nothing real in it to leak, and no track anyone has rights to.
+# silence encoded by ffmpeg with the tags written in. There is nothing real in it
+# to leak, and no track anyone has rights to.
 #
-# It is a drone and not silence because `:matrix` falls to how loud the audio
-# going out right now is, and silence makes it a blank screen. So a render makes
-# a noise: turn the speakers down before you start one.
+# The audio is silence, so a render is silent. The only thing that ever needed
+# real amplitude was the `:matrix` easter egg, and no tape shoots it any more.
 #
 # The lyric cache is seeded too, so `:set lyrics` shows words with no network
 # call: the two tracks with lyrics get invented ones, and every other track gets
@@ -28,13 +27,22 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAGE="$HERE/home"
 MUSIC="$STAGE/Music"
+# The `vibox` symlink lives inside the stage, so `down` takes it with one
+# guarded delete and nothing is left in demo/ to gitignore.
+BIN="$STAGE/.bin"
 VIBOX="$HERE/../target/release/vibox"
 
-# HOME alone is not enough: a shell that exports XDG_DATA_HOME would send the
-# playlists, the lyric cache and the session state back to the real one.
-# PULSE_COOKIE points back at the real home on purpose - the sound server is the
-# one thing that is not staged, and without its cookie there is no playback to
-# film. XDG_RUNTIME_DIR carries through untouched for the same reason.
+# Written by `up`, required by `down`. See the guard further down.
+MARKER=".vibox-demo-stage"
+
+# Used with `env -i`, so this list is not "the real environment plus overrides"
+# but everything there is: HOME alone would send the playlists, the lyric cache
+# and the session state back to the real ones, and overriding leaves whatever
+# variable nobody thought of still pointing at the real thing.
+#
+# The two that reach back into the real home are the sound server, which is the
+# one thing that cannot be staged: without its cookie and its runtime socket
+# there is no playback to film. Neither of them ever reaches a frame.
 stage_env() {
   ENV_ARGS=(
     "HOME=$STAGE"
@@ -43,6 +51,11 @@ stage_env() {
     "XDG_STATE_HOME=$STAGE/.local/state"
     "XDG_CACHE_HOME=$STAGE/.cache"
     "PULSE_COOKIE=$HOME/.config/pulse/cookie"
+    "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    "PATH=$BIN:/usr/local/bin:/usr/bin:/bin"
+    "TERM=${TERM:-xterm-256color}"
+    "COLORTERM=truecolor"
+    "LANG=C.UTF-8"
   )
 }
 
@@ -94,14 +107,19 @@ unsorted=$(cat <<'ROWS'
 ROWS
 )
 
-# Two detuned sines under a slow tremolo, once, as long as the longest track.
-# Every file is a prefix of this, so the whole library costs one synthesis and
-# 22 cheap encodes.
+# Silence, once, as long as the longest track. Every file is a prefix of this, so
+# the whole library costs one synthesis and 22 cheap encodes.
+#
+# Silence and not a tone: a render plays the fixtures on whoever is rendering,
+# and the only thing that ever needed real amplitude was the `:matrix` easter
+# egg, which no longer has a shot or a beat in any tape. Everything the tapes do
+# show - the progress bar, the clock, the statusline - moves on playback
+# advancing, not on how loud it is.
 MASTER=""
 make_master() {
   MASTER="$(mktemp -t vibox-demo-XXXXXX.wav)"
   ffmpeg -nostdin -hide_banner -loglevel error -y -f lavfi \
-    -i "aevalsrc=0.20*sin(2*PI*196*t)*(0.55+0.45*sin(2*PI*0.3*t))+0.13*sin(2*PI*294*t)*(0.55+0.45*sin(2*PI*0.17*t)):s=44100:d=400" \
+    -i "anullsrc=r=44100:cl=stereo:d=400" \
     -c:a pcm_s16le "$MASTER"
 }
 
@@ -250,6 +268,8 @@ up() {
   need "$VIBOX"
   down_quiet
   mkdir -p "$MUSIC"
+  # Stamp it before anything else, so a later `down` can prove this tree is ours.
+  : > "$STAGE/$MARKER"
   echo "encoding fixtures..."
   make_master
   make_album "Halcyon Bus"  "Slow Static"   flac "$album_halcyon_slow_static"
@@ -275,34 +295,88 @@ need() {
   }
 }
 
-# Nothing here mounts anything, but a recursive delete in a convenience script
-# is worth a guard anyway: refuse if something has appeared under the stage, and
-# keep --one-file-system as a second net.
+# ---------------------------------------------------------------------------
+# the teardown guard - identical in every crate's rig
+# ---------------------------------------------------------------------------
+# A rig is a convenience script with a recursive delete in it, run half
+# attentively while thinking about something else, against a path some scenario
+# may have mounted a remote filesystem onto. Both halves of that have already
+# happened in this workflow: a stage path that pointed somewhere real and was
+# deleted because the script trusted its own variable, and an sshfs mount inside
+# a staged home torn down with `rm -rf`, which walked through the mountpoint and
+# deleted the dotfiles on the machine at the far end. So the delete is proved
+# rather than trusted.
+refuse() { echo "REFUSING to delete $STAGE: $1" >&2; exit 1; }
+
+assert_safe_to_delete() {
+  case "$STAGE" in
+    /*) ;;
+    *) refuse "the stage path must be absolute" ;;
+  esac
+  # Resolve symlinks first: a link pointing the stage at something real must not
+  # let a delete through on the strength of a harmless-looking path.
+  local real
+  real="$(cd "$STAGE" && pwd -P)" || refuse "cannot resolve the path"
+  case "$real" in
+    / | /home | /root | /usr | /etc | /var | /opt | /srv | /boot | /tmp)
+      refuse "that is a system directory" ;;
+  esac
+  [ "$real" = "$HOME" ] && refuse "that is your home directory"
+  case "$HOME/" in
+    "$real"/*) refuse "your home directory is inside it" ;;
+  esac
+  # The real gate: only ever delete a tree this script built and stamped.
+  [ -f "$real/$MARKER" ] || refuse "no \`$MARKER\` in it, so this script did not build it"
+  # Unmount anything under it, longest path first, then check again: a recursive
+  # delete walks straight through a mountpoint and removes the far side.
+  local mp
+  while read -r mp; do
+    [ -n "$mp" ] || continue
+    echo "unmounting $mp"
+    fusermount -u "$mp" 2> /dev/null || umount "$mp" 2> /dev/null || true
+  done < <(awk -v s="$real/" '$2 ~ "^"s {print length($2), $2}' /proc/mounts |
+             sort -rn | cut -d' ' -f2-)
+  if awk -v s="$real/" '$2 ~ "^"s {found=1} END {exit !found}' /proc/mounts; then
+    refuse "something is still mounted under it; unmount it by hand and rerun"
+  fi
+}
+
 down_quiet() {
   [ -d "$STAGE" ] || return 0
-  if awk -v s="$STAGE/" '$2 ~ "^"s {found=1} END {exit !found}' /proc/mounts; then
-    echo "REFUSING to delete $STAGE: something is mounted under it." >&2
-    exit 1
-  fi
+  assert_safe_to_delete
+  # --one-file-system as a second net, in case the mount check was wrong.
   rm -rf --one-file-system "$STAGE"
 }
 
+# ---------------------------------------------------------------------------
+# the shell in frame - identical in every crate's rig
+# ---------------------------------------------------------------------------
+# The prompt is invented, and deliberately not the renderer's own. Sourcing a
+# real ~/.bashrc paints a different picture on every machine that regenerates
+# the assets, which defeats the point of keeping the rig in the repo: these
+# images are a build output, and a build output that depends on whose machine
+# ran it is not reproducible. A username is not a leak, but `user@host` is the
+# same for everyone, and it is the same string in all six rigs so the frames
+# match. No tape sets a theme either, so every frame is VHS's default black.
+write_demorc() {
+  cat > "$STAGE/.demorc" <<'EOF'
+PS1='\[\e[38;5;114m\]user@host\[\e[0m\]:\[\e[38;5;110m\]\w\[\e[0m\]\$ '
+unset PROMPT_COMMAND
+HISTFILE=
+clear
+EOF
+}
+
 # A shell that finds this build as `vibox`, so the frame shows the command you
-# would type rather than a path into target/release. It keeps your own prompt:
-# this runs before HOME is redirected, so $HOME here is still the real one, and
-# a staged prompt looks staged.
+# would type rather than a path into target/release. It starts in the staged
+# home, so `~` on screen is the fixture and never you.
 open_shell() {
   stage_env
-  mkdir -p "$HERE/bin"
-  ln -sf "$(cd "$(dirname "$VIBOX")" && pwd)/vibox" "$HERE/bin/vibox"
-  {
-    echo "[ -f '$HOME/.bashrc' ] && . '$HOME/.bashrc'"
-    echo "clear"
-  } > "$HERE/shellrc"
-  (cd "$STAGE" && env "${ENV_ARGS[@]}" \
-    PATH="$HERE/bin:$PATH" \
-    STARSHIP_CONFIG="$HOME/.config/starship.toml" \
-    bash --noprofile --rcfile "$HERE/shellrc" -i)
+  mkdir -p "$BIN"
+  ln -sf "$(cd "$(dirname "$VIBOX")" && pwd)/vibox" "$BIN/vibox"
+  write_demorc
+  (cd "$STAGE" && env -i "${ENV_ARGS[@]}" \
+    bash --noprofile --rcfile "$STAGE/.demorc" -i)
 }
 
 case "${1:-up}" in
@@ -310,7 +384,7 @@ case "${1:-up}" in
   # From inside the staged home, so `~` on screen is the fixture and never you.
   run)
     stage_env
-    (cd "$STAGE" && env "${ENV_ARGS[@]}" "$VIBOX")
+    (cd "$STAGE" && env -i "${ENV_ARGS[@]}" "$VIBOX")
     ;;
   shell) open_shell ;;
   down)

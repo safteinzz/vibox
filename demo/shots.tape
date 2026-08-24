@@ -18,6 +18,7 @@ Output "/tmp/vibox-shots-throwaway.gif"
 
 Set Shell bash
 Set FontFamily "JetBrainsMono NF"
+Set Theme "Catppuccin Mocha"
 Set FontSize 15
 # 1400x620 is 133 columns by 28 rows: the sidebar, every track column and the
 # lyrics pane side by side, with the library filling the pane.
@@ -134,10 +135,5 @@ Enter
 Sleep 300ms
 Escape
 Sleep 300ms
-Type ":matrix"
-Enter
-Sleep 12s
 Show
 Sleep 700ms
-Screenshot ../readme-assets/matrix.png
-Sleep 1s

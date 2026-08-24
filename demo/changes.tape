@@ -12,6 +12,7 @@ Output "/tmp/vibox-changes-throwaway.gif"
 
 Set Shell bash
 Set FontFamily "JetBrainsMono NF"
+Set Theme "Catppuccin Mocha"
 Set FontSize 15
 Set Width 1400
 Set Height 250

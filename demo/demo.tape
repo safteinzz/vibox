@@ -12,6 +12,7 @@ Output "../readme-assets/demo.gif"
 
 Set Shell bash
 Set FontFamily "JetBrainsMono NF"
+Set Theme "Catppuccin Mocha"
 Set FontSize 15
 Set Width 1400
 Set Height 620
@@ -150,15 +151,7 @@ Type "gT"
 Sleep 1.5s
 
 # ===========================================================================
-# 9 - one more thing
-# ===========================================================================
-Type ":matrix"
-Sleep 400ms
-Enter
-Sleep 3.5s
-
-# ===========================================================================
-# 10 - a jukebox you exit with :q
+# 9 - a jukebox you exit with :q
 # ===========================================================================
 Type ":q"
 Sleep 400ms

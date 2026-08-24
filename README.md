@@ -19,7 +19,7 @@ Every dependency is pure rust, so the install cannot fail on a missing C header.
 Sound goes out over the pulseaudio socket, which pipewire serves as well. Linux
 only for now.
 
-![A tour of vibox: playing a track with vi motions, searching, renaming four badly named files in place, reading the pending diff with :changes, writing it with :w, the lyrics pane following the song, a playlist opening in its own tab, and the matrix easter egg](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/demo.gif)
+![A tour of vibox: playing a track with vi motions, searching, renaming four badly named files in place, reading the pending diff with :changes, writing it with :w, the lyrics pane following the song, and a playlist opening in its own tab](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/demo.gif)
 
 ## Rename files in place
 

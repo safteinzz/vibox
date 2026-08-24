@@ -11,9 +11,7 @@ GEMINI.md
 # Private reference material, never committed - see AGENTS.md
 /.nocommit
 
-# The demo rig's scratch: fixtures, the staged home, the shell it opens.
-# demo/*.tape and demo/stage.sh are the source of every README asset and are
-# committed; nothing under here is.
+# The demo rig's scratch: the staged home it builds, which holds the fixtures,
+# the `vibox` symlink and the rc the staged shell reads. demo/*.tape and
+# demo/stage.sh are the source of every README asset and are committed.
 /demo/home
-/demo/bin
-/demo/shellrc

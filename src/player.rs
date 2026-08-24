@@ -18,6 +18,7 @@
 use std::ffi::CString;
 use std::fs::File;
 use std::io::BufReader;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -417,6 +418,34 @@ fn pump(
     }
 }
 
+/// The sink to play into.
+///
+/// `@DEFAULT_SINK@` is resolved by the server, which knows nothing about who is
+/// asking, so "send this app to the other card" cannot be answered there. Every
+/// libpulse client answers it from `PULSE_SINK`, and that is the variable a
+/// person reaches for (or a script sets, per app) to route one program at one
+/// output. Talking the protocol directly means reading it here or not honouring
+/// it at all.
+///
+/// A name the server does not know comes back as an error on the stream, which
+/// the loop already turns into a message on the status row rather than a crash.
+fn sink_name() -> CString {
+    sink_from(std::env::var_os("PULSE_SINK"))
+}
+
+/// The decision on its own, so it can be checked without touching the
+/// environment of a running process.
+fn sink_from(var: Option<std::ffi::OsString>) -> CString {
+    match var {
+        // An interior nul cannot be a sink name, so treat it as unset rather
+        // than failing playback over a malformed variable.
+        Some(name) if !name.is_empty() => {
+            CString::new(name.as_bytes()).unwrap_or_else(|_| protocol::DEFAULT_SINK.to_owned())
+        }
+        _ => protocol::DEFAULT_SINK.to_owned(),
+    }
+}
+
 fn command(
     sock: &mut BufReader<UnixStream>,
     version: u16,
@@ -445,7 +474,7 @@ fn command(
                 },
                 channel_map,
                 cvolume: Some(protocol::ChannelVolume::norm(channels as u8)),
-                sink_name: Some(protocol::DEFAULT_SINK.to_owned()),
+                sink_name: Some(sink_name()),
                 buffer_attr: protocol::stream::BufferAttr {
                     max_length: u32::MAX,
                     target_length: (bytes_per_sec as f32 * BUFFER_SECS) as u32,
@@ -583,4 +612,40 @@ fn feed(
         stream.draining = true;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn a_named_sink_is_used() {
+        let name = "alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink";
+        assert_eq!(
+            sink_from(Some(OsString::from(name))).to_str().unwrap(),
+            name
+        );
+    }
+
+    #[test]
+    fn unset_falls_back_to_the_server_default() {
+        assert_eq!(sink_from(None), protocol::DEFAULT_SINK.to_owned());
+    }
+
+    #[test]
+    fn an_empty_value_is_not_a_sink_name() {
+        // `PULSE_SINK=` is how a shell unsets it in practice.
+        assert_eq!(
+            sink_from(Some(OsString::new())),
+            protocol::DEFAULT_SINK.to_owned()
+        );
+    }
+
+    #[test]
+    fn an_interior_nul_falls_back_rather_than_failing_playback() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(b"speak\0er".to_vec());
+        assert_eq!(sink_from(Some(bad)), protocol::DEFAULT_SINK.to_owned());
+    }
 }
