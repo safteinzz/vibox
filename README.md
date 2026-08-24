@@ -9,17 +9,22 @@ a jukebox you exit with :q - a cli music player whose library is a vim buffer, n
 ## Install
 
 ```bash
-cargo install vibox   # that is the whole install: no system libraries, no headers
-vibox ~/Music         # or just `vibox`, for your music directory
-vibox rotation.m3u    # a playlist is a library too
-vibox self update     # reinstall the latest release later on
+cargo install vibox
+vibox self check   # is a newer release out?
+vibox self update  # install the latest
 ```
 
-Every dependency is pure rust, so the install cannot fail on a missing C header.
-Sound goes out over the pulseaudio socket, which pipewire serves as well. Linux
-only for now.
+No cargo yet? Rust installs the same way on every distro: [rustup.rs](https://rustup.rs).
 
 ![A tour of vibox: playing a track with vi motions, searching, renaming four badly named files in place, reading the pending diff with :changes, writing it with :w, the lyrics pane following the song, and a playlist opening in its own tab](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/demo.gif)
+
+## Open a library
+
+```bash
+vibox                 # your music directory
+vibox ~/Music         # or any folder
+vibox rotation.m3u    # a playlist is a library too
+```
 
 ## Rename files in place
 
@@ -59,12 +64,6 @@ recording matches yours within a couple of seconds and the artist and title
 agree with your tags, so otherwise you get the words with no highlight. Off by
 default, cached on disk, `[` and `]` nudge one track's timing.
 
-## Keys
-
-They are vi keys, counts and all, and `:help` lists every one of them in
-sections. Nothing needs a leader key and nothing needs a `ctrl-b` first, so it
-keeps out of tmux's way.
-
 ## Commands
 
 ```
@@ -100,6 +99,11 @@ Nothing else is written anywhere until you type `:w`. A crash or a kill loses
 whatever was pending, which is also the way out of a mess you would rather not
 apply.
 
+## Compatibility
+
+Linux. Audio goes out over the pulseaudio socket, which pipewire serves as well,
+so nothing needs installing beyond the binary.
+
 ## License
 
-AGPL-3.0-only.
+AGPL-3.0-only
