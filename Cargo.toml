@@ -1,11 +1,11 @@
 [package]
 name = "vibox"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 # let chains and the 2024 edition; an older toolchain fails with parse errors
 # instead of a clear message without this.
 rust-version = "1.89"
-description = "a jukebox you exit with :q - a cli music player with vi motions, ex commands, and tmux manners"
+description = "a jukebox you exit with :q - a cli music player whose library is a vim buffer, nothing written until :w"
 authors = ["Pablo Antonio Hernández Hernández (safteinzz)"]
 license = "AGPL-3.0-only"
 repository = "https://gitlab.com/safteinzz/vibox"
@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "multimedia::audio"]
 # README screenshots are fetched over the network by crates.io via absolute raw
 # URLs, never read out of the package, so shipping them would only bloat every
 # download; the rest are local working files that are not part of the crate.
-exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/", "readme-assets/"]
+exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/", "readme-assets/", "demo/"]
 
 [dependencies]
 anyhow = "1"                                    # error plumbing, context on every failure the user can act on

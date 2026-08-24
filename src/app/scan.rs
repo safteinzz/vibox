@@ -1,5 +1,6 @@
 //! Opening and scanning a library, and the folder list it produces.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -19,6 +20,22 @@ impl App {
     /// the terminal is taken over, has anywhere to say it.
     pub fn reload_reporting(&mut self, on: library::Report) -> Result<()> {
         let under_cursor = self.current_track().map(|t| t.path.clone());
+        // Every index into `tracks` is about to mean something else, so what
+        // is playing and what it is playing through are remembered as paths
+        // and looked up again below. Dropping them instead left the sound
+        // thread playing a track the statusline said was not playing.
+        let was_playing = self.playing_track().map(|t| t.path.clone());
+        let queued: Vec<PathBuf> = self
+            .queue
+            .iter()
+            .filter_map(|&i| self.tracks.get(i))
+            .map(|t| t.path.clone())
+            .collect();
+        let at_qpos = self
+            .queue
+            .get(self.qpos)
+            .and_then(|&i| self.tracks.get(i))
+            .map(|t| t.path.clone());
 
         self.tracks = library::scan_reporting(&self.root, on)?;
         // `path` order means "the order the files came in", which for a
@@ -33,8 +50,25 @@ impl App {
         };
         self.folders = library::folders(&self.tracks, &base);
         self.folder_cur = self.folder_cur.min(self.folders.len());
-        self.playing = None;
-        self.queue.clear();
+
+        // The queue keeps its own order: it is a snapshot of the view as it
+        // was when playback started, not of the view as it is now. A track
+        // that left the library on this scan simply drops out of it.
+        let index: HashMap<&Path, usize> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.path.as_path(), i))
+            .collect();
+        self.queue = queued
+            .iter()
+            .filter_map(|p| index.get(p.as_path()))
+            .copied()
+            .collect();
+        self.qpos = at_qpos
+            .and_then(|p| self.queue.iter().position(|&i| self.tracks[i].path == p))
+            .unwrap_or(0);
+        self.playing = was_playing.and_then(|p| index.get(p.as_path()).copied());
         self.rebuild_view();
 
         if let Some(path) = under_cursor
