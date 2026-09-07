@@ -172,11 +172,9 @@ pub(super) fn gather(count: usize, mut edit: impl FnMut() -> String) -> String {
 
 /// Second key of `cw`, `cc`, `dw`, `dd`.
 pub(super) fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
-    // `y` only reads, so it neither checkpoints nor touches the name: it runs
-    // the motion on a copy and keeps what that would have taken. Whatever
-    // `dw` deletes is by construction exactly what `yw` yanks.
-    // `d3w` and `3dw` are the same thing, so the count is read here whichever
-    // side of the operator it was typed on.
+    // `y` only reads, so it runs the motion on a copy: whatever `dw` deletes is
+    // what `yw` yanks. The count is read here because `d3w` and `3dw` are the
+    // same thing.
     let count = app.count.take().unwrap_or(1);
 
     if op == 'y' {

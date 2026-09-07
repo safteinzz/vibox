@@ -330,11 +330,9 @@ impl App {
     /// `:w`: renames the files you edited and saves the playlist you changed,
     /// in one press, and says what it did.
     pub fn write_all(&mut self) {
-        // The whole batch is checked against the disk before a single byte is
-        // written, so a clash leaves every change pending instead of applying
-        // half of them. `plan` is the only thing allowed to say a write is
-        // safe: it sees the renames, moves, copies and deletions together,
-        // where the old per-kind checks each saw only their own.
+        // The whole batch is checked against the disk before a byte is written, so a
+        // clash leaves every change pending instead of applying half. `plan` is the
+        // only thing allowed to call a write safe: it sees every kind together.
         self.commit_name();
         let steps = match self.write_plan() {
             Ok(steps) => steps,
@@ -422,13 +420,9 @@ impl App {
             }
         }
 
-        // A rename or a move changes where a row belongs in the sort, and a
-        // move changes which folders exist. Put the list back in order here
-        // rather than making the user follow every `:w` with a `:sort`.
-        //
-        // Deliberately not a rescan: `reload` throws away `playing` and the
-        // queue, and the names on disk already match what is in memory, so
-        // there is nothing to read back.
+        // A rename moves a row in the sort and a move changes which folders exist, so
+        // put the list back in order rather than making you follow `:w` with `:sort`.
+        // Not a rescan: `reload` would throw away `playing` and the queue.
         if renames || moved + copied + removed > 0 {
             self.resort();
             let base = if self.root.is_dir() {
@@ -527,11 +521,9 @@ impl App {
             if let Some(row) = self.tracks.iter().position(|t| t.path == want) {
                 rows.push(row);
             } else if want.is_file() {
-                // A playlist may name tracks from outside the library; read
-                // them in rather than dropping them, but mark them so they
-                // stay reachable only through this playlist. Without that,
-                // `everything` and the folder pane grow rows the library
-                // never had.
+                // A playlist may name tracks from outside the library: read them in, but mark
+                // them so they stay reachable only through it, or `everything` and the folder
+                // pane grow rows the library never had.
                 match library::scan(&want) {
                     Ok(mut found) if !found.is_empty() => {
                         let mut stray = found.remove(0);
