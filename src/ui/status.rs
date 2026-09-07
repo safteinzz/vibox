@@ -92,12 +92,11 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let where_ = match (app.focus, app.tab) {
         (Pane::Folders, Tab::Playlists) => " PLAYLISTS ",
         (Pane::Folders, Tab::Folders) => " FOLDERS ",
+        (Pane::Lyrics, _) => " LYRICS ",
         (Pane::Tracks, _) => "",
     };
     // vim's modified marker: something is typed but not written.
     let dirty = if app.unsaved() { " [+] " } else { "" };
-    let vol = format!(" vol {vol} ");
-
     // The track name is the only elastic part: everything else has to fit, or
     // a five digit track count gets its last digit shaved off.
     let fixed = left.chars().count()
@@ -140,9 +139,16 @@ pub(super) fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
             spans.extend(with_cursor(app));
             Line::from(spans)
         }
-        _ => match &app.msg {
-            Some((text, true)) => Line::styled(text.clone(), Style::default().fg(Color::Red)),
-            Some((text, false)) => Line::raw(text.clone()),
+        // Green for what worked, yellow for what did not, and never red: red
+        // belongs to a gate in front of something about to be lost, and this
+        // line is only ever about what already happened.
+        _ => match app.live_msg() {
+            Some((text, true)) => {
+                Line::styled(text.to_string(), Style::default().fg(Color::Yellow))
+            }
+            Some((text, false)) => {
+                Line::styled(text.to_string(), Style::default().fg(Color::Green))
+            }
             None => Line::raw(""),
         },
     };

@@ -56,24 +56,6 @@ fn set_turns_options_on_off_and_over() {
     );
 }
 
-/// The rule danger exists for: it is off on every start unless the rc file
-/// asked for it, and quitting with it on must not be what asks.
-#[test]
-fn danger_is_never_on_because_a_previous_session_had_it_on() {
-    let (mut app, _dir) = library(&["a.mp3"]);
-    assert!(!app.danger, "off until it is asked for");
-
-    crate::excmd::run(&mut app, "set danger");
-    assert!(app.danger);
-
-    // What quitting writes down, and a new process reads back on the way in.
-    let restored = crate::excmd::saved_options(&app);
-    assert!(
-        !restored.contains("danger"),
-        "danger reached the saved session as `{restored}`"
-    );
-}
-
 #[test]
 fn moving_the_folder_cursor_leaves_the_track_list_alone() {
     let (mut app, _dir) = library(&["a.mp3", "jazz/b.mp3"]);
@@ -200,17 +182,23 @@ fn a_playlist_is_a_view_and_does_not_become_the_library() {
 }
 
 #[test]
-fn danger_is_needed_before_a_key_can_delete_a_file() {
-    let (mut app, _dir) = library(&["a.mp3"]);
+fn deleting_a_file_only_marks_it_until_the_write() {
+    // The safety is the staging, not an arming switch in front of it: `dd`
+    // marks, `:ch` lists what is waiting, and `:w` is the only thing that ever
+    // touches the disk.
+    let (mut app, dir) = library(&["a.mp3"]);
     app.cut_tracks();
-    assert!(app.doomed_files.is_empty(), "nothing marked without danger");
-    assert!(app.msg.as_ref().is_some_and(|(_, error)| *error));
 
-    app.danger = true;
-    app.cut_tracks();
     assert_eq!(app.doomed_files.len(), 1);
-    assert!(app.unsaved());
+    assert!(
+        app.unsaved(),
+        "and `:q` refuses until it is written or dropped"
+    );
     assert!(app.view.is_empty(), "a marked file leaves the list at once");
+    assert!(
+        dir.path().join("a.mp3").exists(),
+        "but it is still on disk until `:w`"
+    );
 }
 
 #[test]
@@ -251,7 +239,6 @@ fn renaming_the_playing_track_keeps_playback_pointed_at_it() {
 #[test]
 fn a_folder_takes_everything_under_it_including_subfolders() {
     let (mut app, dir) = library(&["jazz/a.mp3", "jazz/live/b.mp3", "rock/c.mp3"]);
-    app.danger = true;
     // row 0 is the whole library, so jazz is the first real folder
     app.folder_cur = 1 + app
         .folders
@@ -273,7 +260,6 @@ fn a_folder_takes_everything_under_it_including_subfolders() {
 #[test]
 fn a_marked_folder_is_unmarked_by_pressing_dd_again() {
     let (mut app, _dir) = library(&["jazz/a.mp3"]);
-    app.danger = true;
     app.folder_cur = 1;
     app.cut_folder();
     assert!(app.unsaved());
@@ -441,7 +427,6 @@ fn shuffle_goes_back_to_what_was_actually_played() {
 #[test]
 fn e_bang_throws_away_every_kind_of_pending_change() {
     let (mut app, dir) = library(&["a.mp3", "b.mp3", "jazz/c.mp3"]);
-    app.danger = true;
 
     // a rename, a cut file, and a playlist edit, all waiting
     app.begin_edit();
@@ -546,7 +531,6 @@ fn an_m3u_opened_as_the_root_makes_its_tracks_the_library() {
 #[test]
 fn undo_takes_back_a_pending_deletion() {
     let (mut app, _dir) = library(&["a.mp3", "b.mp3"]);
-    app.danger = true;
     app.cut_tracks();
     assert_eq!(app.view.len(), 1);
 
@@ -640,7 +624,6 @@ fn writing_a_rename_puts_the_list_back_in_order() {
 #[test]
 fn pasted_files_stay_where_they_were_dropped() {
     let (mut app, _dir) = library(&["aaa.mp3", "mmm.mp3", "zzz/keep.mp3"]);
-    app.danger = true;
 
     // cut the row that would sort first, then put it in the `zzz` folder
     app.cur = app
@@ -684,7 +667,6 @@ fn pasted_files_stay_where_they_were_dropped() {
 #[test]
 fn a_refused_write_deletes_nothing() {
     let (mut app, dir) = library(&["a.mp3", "b.mp3", "gone.mp3"]);
-    app.danger = true;
 
     // mark one for deletion, and rename another onto a name already taken
     app.cur = app
@@ -718,7 +700,6 @@ fn a_refused_write_deletes_nothing() {
 #[test]
 fn a_rename_onto_a_song_being_deleted_goes_through() {
     let (mut app, dir) = library(&["keep.mp3", "dupe.mp3"]);
-    app.danger = true;
 
     app.cur = app
         .view
@@ -800,7 +781,6 @@ fn two_rows_renamed_to_one_name_are_refused() {
 fn a_rename_and_a_move_onto_the_same_name_are_refused() {
     let (mut app, dir) = library(&["a.mp3", "sub/x.mp3"]);
     let root = dir.path().to_path_buf();
-    app.danger = true;
 
     // the move: sub/x.mp3 into the root
     app.moves = vec![(root.join("sub/x.mp3"), root.join("x.mp3"))];
@@ -830,7 +810,6 @@ fn a_rename_and_a_move_onto_the_same_name_are_refused() {
 #[test]
 fn deleting_a_row_you_renamed_drops_the_rename() {
     let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
-    app.danger = true;
 
     app.cur = app
         .view
@@ -863,7 +842,6 @@ fn deleting_a_row_you_renamed_drops_the_rename() {
 #[test]
 fn deleting_a_row_leaves_other_pending_renames_alone() {
     let (mut app, dir) = library(&["a.mp3", "b.mp3"]);
-    app.danger = true;
 
     app.cur = app
         .view
@@ -898,7 +876,6 @@ fn deleting_a_row_leaves_other_pending_renames_alone() {
 #[test]
 fn deleting_a_folder_drops_the_renames_inside_it() {
     let (mut app, dir) = library(&["jazz/a.mp3", "keep.mp3"]);
-    app.danger = true;
 
     // rename a track inside the folder
     let jazz = app
@@ -929,7 +906,6 @@ fn deleting_a_folder_drops_the_renames_inside_it() {
 #[test]
 fn deleting_a_folder_drops_the_rename_of_the_folder() {
     let (mut app, dir) = library(&["jazz/a.mp3"]);
-    app.danger = true;
 
     let jazz = app
         .folders
@@ -978,7 +954,6 @@ fn deleting_a_playlist_drops_its_pending_rename() {
 #[test]
 fn undoing_a_deletion_brings_its_rename_back() {
     let (mut app, _dir) = library(&["a.mp3", "b.mp3"]);
-    app.danger = true;
 
     app.cur = app
         .view

@@ -17,7 +17,7 @@ use crate::library::Track;
 /// Stamped on every cache entry. Bump it when what gets cached changes
 /// meaning: entries without the current marker are refetched rather than
 /// trusted, since an old one cannot say whether its timings were believed.
-const CACHE_MARK: &str = "[vibox:3]";
+const CACHE_MARK: &str = "[vibox:4]";
 
 /// Who the words came from, for the pane to credit. One provider today; when
 /// there are two this moves onto `Lyrics` so each result carries its own.
@@ -105,7 +105,10 @@ impl Fetcher {
             artist: track.artist.clone(),
             title: track.title.clone(),
             album: track.album.clone(),
-            duration: track.duration.as_secs(),
+            // Rounded, not truncated: lrclib's exact lookup allows two seconds
+            // either side, and truncating 318.98 to 318 spends most of one of
+            // them before the request leaves.
+            duration: track.duration.as_secs_f64().round() as u64,
         });
     }
 
@@ -124,13 +127,20 @@ impl Fetcher {
 
     /// Shifts this file's lyrics and writes the correction into its cache
     /// entry, so the track stays in sync every time it is played.
-    pub fn nudge(&mut self, path: &Path, delta_ms: i64) -> i64 {
+    ///
+    /// `None` when there are no timestamps to shift, because an offset applies
+    /// to those and nothing else: reporting a shift that cannot move anything
+    /// on screen is a status line saying something worked when it did not.
+    pub fn nudge(&mut self, path: &Path, delta_ms: i64) -> Option<i64> {
+        if !matches!(self.cache.get(path), Some(Lyrics::Synced(_))) {
+            return None;
+        }
         let offset = self.offset(path) + delta_ms;
         self.offsets.insert(path.to_path_buf(), offset);
         if let Some(lyrics) = self.cache.get(path) {
             store_cached(path, lyrics, offset);
         }
-        offset
+        Some(offset)
     }
 
     pub fn get(&self, path: &Path) -> Option<&Lyrics> {
@@ -189,13 +199,7 @@ fn fetch(job: &Request) -> Lyrics {
     );
 
     match get_json(&exact) {
-        // lrclib matches duration loosely, so it will answer with a different
-        // edit of the same song. Check the duration ourselves before believing
-        // its timestamps.
-        Ok(body) => {
-            let trust = gap(&body, job.duration) <= SYNC_TOLERANCE;
-            return from_json(&body, job.duration, trust);
-        }
+        Ok(body) => return from_json(&body, job.duration),
         // A miss on the exact match is normal: the duration or the album
         // rarely lines up with what someone else uploaded.
         Err(FetchError::NotFound) => {}
@@ -209,20 +213,13 @@ fn fetch(job: &Request) -> Lyrics {
     );
     match get_json(&search) {
         Ok(body) => match pick(&body, job) {
-            Some(hit) => {
-                let trust = gap(&hit, job.duration) <= SYNC_TOLERANCE;
-                from_json(&hit, job.duration, trust)
-            }
+            Some(hit) => from_json(&hit, job.duration),
             None => Lyrics::Missing("no lyrics on lrclib for this track".into()),
         },
         Err(FetchError::NotFound) => Lyrics::Missing("no lyrics on lrclib for this track".into()),
         Err(FetchError::Other(e)) => Lyrics::Missing(e),
     }
 }
-
-/// How far a hit's duration may be from ours before its timestamps belong to
-/// another edit. Seconds of difference show up as seconds of lag.
-const SYNC_TOLERANCE: f64 = 2.0;
 
 /// True when the last line is timed past the end of the track, allowing a few
 /// seconds for a fade or a sloppy final timestamp.
@@ -240,6 +237,11 @@ const NAME_TOLERANCE: f64 = 0.3;
 
 /// Picks the hit closest in duration, out of the ones that are actually this
 /// song.
+///
+/// Ranking is all the duration is good for. An lrclib entry's duration is the
+/// length of whoever uploaded it, not of the sheet: the same twenty timestamped
+/// lines come back claiming anything from 4:23 to 6:58, so a hit being seven
+/// seconds out is no evidence at all against its timestamps.
 ///
 /// lrclib's search is a substring match on both fields, so asking for `Wax` and
 /// `Destiny` also answers with `Nightmares on Wax - Date With Destiny`. Ranking
@@ -353,9 +355,8 @@ fn text_of(value: &serde_json::Value, key: &str) -> String {
         .to_string()
 }
 
-/// `trust_timing` false means the words are right but the timestamps belong to
-/// another release, so they are shown without a following highlight.
-fn from_json(body: &serde_json::Value, ours: u64, trust_timing: bool) -> Lyrics {
+/// Timestamps survive unless they cannot be about this track at all.
+fn from_json(body: &serde_json::Value, ours: u64) -> Lyrics {
     if body
         .get("instrumental")
         .and_then(serde_json::Value::as_bool)
@@ -369,8 +370,9 @@ fn from_json(body: &serde_json::Value, ours: u64, trust_timing: bool) -> Lyrics 
         return match parse(&synced) {
             // Lyrics that run past the end of the track are from a longer
             // recording, whatever the entry claims its duration is: an lrclib
-            // entry can say 2:44 and carry timings out to 3:10.
-            Lyrics::Synced(lines) if !trust_timing || runs_over(&lines, ours) => {
+            // entry can say 2:44 and carry timings out to 3:10. This is the
+            // one thing that ever costs a sheet its timestamps.
+            Lyrics::Synced(lines) if runs_over(&lines, ours) => {
                 Lyrics::Plain(lines.into_iter().map(|(_, words)| words).collect())
             }
             other => other,
@@ -450,7 +452,12 @@ fn cache_path(track: &Path) -> Option<PathBuf> {
 fn load_cached(track: &Path) -> Option<(Lyrics, i64)> {
     let text = std::fs::read_to_string(cache_path(track)?).ok()?;
     // Written by an older vibox: refetch rather than believe its timestamps.
-    let text = text.strip_prefix(CACHE_MARK)?;
+    // The newline after the mark goes with it, or every plain page grows a
+    // blank first row the moment it comes back off the disk.
+    let text = text
+        .strip_prefix(CACHE_MARK)?
+        .strip_prefix('\n')
+        .unwrap_or("");
 
     if text.trim().is_empty() {
         return Some((
@@ -607,6 +614,22 @@ mod tests {
     #[test]
     fn lyrics_timed_past_the_end_of_the_track_are_not_trusted() {
         assert!(runs_over(&timed(&[14, 120, 190]), 164));
+    }
+
+    /// The rule the discard broke: an entry's duration is the length of
+    /// whoever uploaded it, so a hit minutes out still keeps its timestamps
+    /// as long as they land inside our track. `[` and `]` are what fix the
+    /// difference, and they need something to shift.
+    #[test]
+    fn a_hit_whose_duration_disagrees_keeps_its_timestamps() {
+        let mut entry = hit("Ice Cube", "Gangsta Rap Made Me Do It", 326.0);
+        entry["syncedLyrics"] = serde_json::json!("[00:03.41] first\n[04:26.78] last");
+        entry["plainLyrics"] = serde_json::json!("first\nlast");
+
+        match from_json(&entry, 319) {
+            Lyrics::Synced(lines) => assert_eq!(lines.len(), 2),
+            _ => panic!("timestamps that fit inside the track were thrown away"),
+        }
     }
 
     #[test]

@@ -71,6 +71,34 @@ impl App {
         self.scroll_to_cursor();
     }
 
+    /// `j`, `k`, `ctrl-d` and friends with the lyrics pane focused: the words
+    /// move and nothing is selected, since a lyric is not a row you act on.
+    ///
+    /// Scrolling by hand pins the pane, because a page that scrolls itself
+    /// back under you while you are reading it is worse than one that stays
+    /// where you put it. `ctrl-w` off the pane, or the next track, lets it
+    /// follow the song again.
+    pub fn scroll_lyrics(&mut self, delta: isize) {
+        self.lyrics_pinned = true;
+        let max_top = self.lyrics_rows.saturating_sub(self.lyrics_h.max(1));
+        self.lyrics_top = (self.lyrics_top as isize + delta).clamp(0, max_top as isize) as usize;
+    }
+
+    /// `gg` and `G` in the lyrics pane.
+    pub fn lyrics_goto_end(&mut self, end: bool) {
+        self.lyrics_pinned = true;
+        self.lyrics_top = if end {
+            self.lyrics_rows.saturating_sub(self.lyrics_h.max(1))
+        } else {
+            0
+        };
+    }
+
+    /// Back to following the song, and back to wherever that puts it.
+    pub fn unpin_lyrics(&mut self) {
+        self.lyrics_pinned = false;
+    }
+
     /// Moves the cursor in the folder list. The track pane does not follow: a
     /// folder is opened with enter, the same as a playlist.
     pub fn move_folder(&mut self, delta: isize) {

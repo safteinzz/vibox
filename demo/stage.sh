@@ -177,9 +177,9 @@ cache_name() {
   printf '%016x.lrc' "$acc"
 }
 
-# `[vibox:3]` is CACHE_MARK in src/lyrics.rs. An entry without the current mark
+# `[vibox:4]` is CACHE_MARK in src/lyrics.rs. An entry without the current mark
 # is refetched rather than trusted, so this line moves when that one does.
-CACHE_MARK='[vibox:3]'
+CACHE_MARK='[vibox:4]'
 
 seed_lyrics() {
   local dir="$STAGE/.local/share/vibox/lyrics"

@@ -188,6 +188,8 @@ pub(super) fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
                 gather(count, || probe.delete_word(key.code == KeyCode::Char('e')))
             }
             KeyCode::Char('b') => gather(count, || probe.delete_word_back()),
+            KeyCode::Char('0') => probe.delete_to_start(false),
+            KeyCode::Char('^') => probe.delete_to_start(true),
             KeyCode::Char('$') => probe.truncate_here(),
             _ => return,
         };
@@ -210,6 +212,8 @@ pub(super) fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
         (_, KeyCode::Char('b')) => gather(count, || buf.delete_word_back()),
         (_, KeyCode::Char('l')) => gather(count, || buf.delete_here()),
         (_, KeyCode::Char('h')) => gather(count, || buf.delete_back()),
+        (_, KeyCode::Char('0')) => buf.delete_to_start(false),
+        (_, KeyCode::Char('^')) => buf.delete_to_start(true),
         (_, KeyCode::Char('$')) => buf.truncate_here(),
         _ => return,
     };

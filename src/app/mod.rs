@@ -2,6 +2,7 @@
 //! read by the renderer. No state lives anywhere else.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -54,6 +55,9 @@ pub enum Tab {
 pub enum Pane {
     Folders,
     Tracks,
+    /// Only reachable while `:set lyrics` has the pane (or the popup) up, and
+    /// dropped back to `Tracks` the moment it closes.
+    Lyrics,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -143,6 +147,11 @@ impl Columns {
 
 /// Everything waiting for a `:w`, kept in one place so undo is a snapshot of
 /// it and `:w` is the only thing that touches the disk.
+/// How long the line under the panes keeps a message before the screen goes back
+/// to saying nothing. Three seconds, the same everywhere in this family: long
+/// enough to read, short enough that it never reads as the current state.
+const MSG_TTL: Duration = Duration::from_secs(3);
+
 #[derive(Clone, Default)]
 pub struct Pending {
     pub renames: std::collections::BTreeMap<Renaming, String>,
@@ -150,7 +159,7 @@ pub struct Pending {
     pub playlist_dirty: bool,
     /// Playlist files marked with `dd`.
     pub doomed: Vec<PathBuf>,
-    /// Tracks marked for deletion, danger mode only.
+    /// Tracks marked for deletion on the next `:w`.
     pub doomed_files: Vec<PathBuf>,
     /// Files cut with `dd`, waiting for a `p` to turn them into moves.
     pub cut: Vec<PathBuf>,
@@ -208,6 +217,17 @@ pub struct App {
     pub karaoke: bool,
     pub matrix: Matrix,
     pub lyrics: Fetcher,
+    /// First wrapped lyric row on screen. The renderer writes it every frame
+    /// while the pane is following, so scrolling by hand carries on from
+    /// wherever the song had got to rather than jumping to the top.
+    pub lyrics_top: usize,
+    /// Height and total wrapped rows of the lyrics pane, written by the
+    /// renderer the way `track_h` is, because only it knows the wrapping.
+    pub lyrics_h: usize,
+    pub lyrics_rows: usize,
+    /// Set by scrolling the pane by hand, which stops it following until the
+    /// next track or until the focus leaves it.
+    pub lyrics_pinned: bool,
     /// Directories that hold tracks. Index 0 of the pane is the whole library,
     /// so a folder `i` in this vec is row `i + 1`.
     pub folders: Vec<(String, PathBuf)>,
@@ -263,12 +283,10 @@ pub struct App {
     pub playlist_dirty: bool,
     /// Playlists marked for deletion, written by `:w` like every other change.
     pub doomed: Vec<PathBuf>,
-    /// `:set danger`: lets `dd`, `p` and `o` touch files, still only on `:w`.
-    pub danger: bool,
     pub doomed_files: Vec<PathBuf>,
     pub cut: Vec<PathBuf>,
     pub moves: Vec<(PathBuf, PathBuf)>,
-    /// Yanked files waiting to be copied into a folder, danger mode only.
+    /// Yanked files waiting to be copied into a folder on the next `:w`.
     pub copies: Vec<(PathBuf, PathBuf)>,
     pub doomed_dirs: Vec<PathBuf>,
     undo_stack: Vec<Pending>,
@@ -297,7 +315,14 @@ pub struct App {
     pub audio: Option<Audio>,
     /// Absent on a machine with no session bus; media keys just do nothing then.
     pub mpris: Option<Mpris>,
+    /// The line under the panes: what just happened, and whether it failed.
+    /// Green when it worked, yellow when it did not, and gone after `MSG_TTL`,
+    /// which is the same three seconds every other tool in this family gives a
+    /// status line.
     pub msg: Option<(String, bool)>,
+    /// When `msg` was set, so it can expire instead of sitting there looking
+    /// like it is still current.
+    pub msg_at: Option<std::time::Instant>,
     /// Where the real terminal cursor goes while inserting, set by the renderer.
     pub cursor_screen: Option<(u16, u16)>,
     /// Everything played this session, oldest first, one line each. Repeats are
@@ -337,6 +362,10 @@ impl App {
             karaoke: true,
             matrix: Matrix::default(),
             lyrics: Fetcher::new(),
+            lyrics_top: 0,
+            lyrics_h: 1,
+            lyrics_rows: 0,
+            lyrics_pinned: false,
             folders: Vec::new(),
             folder_cur: 0,
             folder_open: 0,
@@ -369,7 +398,6 @@ impl App {
             yank: Vec::new(),
             playlist_dirty: false,
             doomed: Vec::new(),
-            danger: false,
             doomed_files: Vec::new(),
             cut: Vec::new(),
             moves: Vec::new(),
@@ -390,6 +418,7 @@ impl App {
             audio,
             mpris: mpris::start().ok(),
             msg: None,
+            msg_at: None,
             cursor_screen: None,
             played: Vec::new(),
             show_history: false,
@@ -413,12 +442,26 @@ impl App {
         Ok(app)
     }
 
+    /// Something worked. Green.
     pub fn info(&mut self, text: impl Into<String>) {
         self.msg = Some((text.into(), false));
+        self.msg_at = Some(std::time::Instant::now());
     }
 
+    /// Something did not. Yellow, never red: red is for a gate in front of
+    /// something about to be lost, and this line only ever reports what has
+    /// already happened.
     pub fn error(&mut self, text: impl Into<String>) {
         self.msg = Some((text.into(), true));
+        self.msg_at = Some(std::time::Instant::now());
+    }
+
+    /// The message while it is still fresh, and its kind. `None` once it has
+    /// expired, so an old line never reads as the current state.
+    pub fn live_msg(&self) -> Option<(&str, bool)> {
+        let at = self.msg_at?;
+        let (text, bad) = self.msg.as_ref()?;
+        (at.elapsed() < MSG_TTL).then_some((text.as_str(), *bad))
     }
 }
 
@@ -437,7 +480,7 @@ fn seed() -> u64 {
 // blocks for one type are ordinary rust; the split is so a reader can find
 // things, and so each area only reaches what it needs.
 mod cursor;
-mod danger;
+mod files;
 pub mod plan;
 mod playback;
 mod playlists;

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::app::{App, Repeat};
+use crate::app::{App, Pane, Repeat};
 use crate::library::SortKey;
 
 pub struct Parsed<'a> {
@@ -226,10 +226,14 @@ fn set(app: &mut App, args: &str) {
             w => (w, '1'),
         };
 
+        // An option we do not have is skipped rather than fatal, so one stale
+        // name in an rc file (`set danger`, which used to exist) cannot cost
+        // you the options written beside it. Typed by hand it still says so;
+        // `load_rc` clears the line when it is the file talking.
         let Some(current) = option(app, name) else {
             let known = OPTIONS.join(", ");
             app.error(format!("unknown option `{name}` - try {known}"));
-            return;
+            continue;
         };
 
         match action {
@@ -251,11 +255,7 @@ fn set(app: &mut App, args: &str) {
 
     // An option only lasts the session until `:mkrc` writes it, so say so
     // every time rather than expecting anyone to remember.
-    let mut line = format!("{} | `:mkrc` keeps these", touched.join(" "));
-    if app.danger {
-        line.push_str(" | measure twice, `:w` once");
-    }
-    app.info(line);
+    app.info(format!("{} | `:mkrc` keeps these", touched.join(" ")));
 }
 
 /// Where the last session is remembered. This is state, not configuration, so
@@ -378,13 +378,8 @@ fn mkrc(app: &mut App, bang: bool) {
         .unwrap_or_else(|| app.root.clone())
         .display()
         .to_string();
-    // `:mkrc` is typed on purpose, so danger asked for here gets written. The
-    // session state still leaves it out: that one is automatic, and danger
-    // coming back without anyone asking is the failure this option must not
-    // have.
-    let danger = if app.danger { "set danger\n" } else { "" };
     let body = format!(
-        "\" written by :mkrc\nset root={music}\nset {}\n{danger}",
+        "\" written by :mkrc\nset root={music}\nset {}\n",
         saved_options(app)
     );
     let wrote = path
@@ -393,17 +388,7 @@ fn mkrc(app: &mut App, bang: bool) {
         .and_then(|()| std::fs::write(&path, body));
 
     match wrote {
-        Ok(()) => {
-            let shown = path.display().to_string();
-            // Never let danger be written quietly, even when it was asked for.
-            if app.danger {
-                app.info(format!(
-                    "wrote {shown}, danger included: it is on every launch now"
-                ));
-            } else {
-                app.info(format!("wrote {shown}"));
-            }
-        }
+        Ok(()) => app.info(format!("wrote {}", path.display())),
         Err(e) => {
             let shown = path.display();
             app.error(format!("cannot write `{shown}`: {e}"));
@@ -412,39 +397,34 @@ fn mkrc(app: &mut App, bang: bool) {
 }
 
 /// Every `:set` option: the tag columns, plus the panes that can be turned off.
-const OPTIONS: [&str; 7] = [
-    "file", "title", "artist", "album", "lyrics", "karaoke", "danger",
-];
+const OPTIONS: [&str; 6] = ["file", "title", "artist", "album", "lyrics", "karaoke"];
 
 fn option(app: &App, name: &str) -> Option<bool> {
     match name {
         "lyrics" => Some(app.show_lyrics),
         "karaoke" => Some(app.karaoke),
-        "danger" => Some(app.danger),
         other => app.columns.get(other),
     }
 }
 
 fn set_option(app: &mut App, name: &str, on: bool) {
-    if name == "danger" {
-        app.danger = on;
-    } else if name == "karaoke" {
+    if name == "karaoke" {
         app.karaoke = on;
     } else if name == "lyrics" {
         app.show_lyrics = on;
+        // The pane cannot keep the keyboard once it is gone.
+        if !on && app.focus == Pane::Lyrics {
+            app.focus = Pane::Tracks;
+        }
     } else {
         app.columns.set(name, on);
     }
 }
 
-/// The options shared by `:mkrc` and the session state. `danger` is absent on
-/// purpose: `:mkrc` adds it separately because it was typed, while the session
-/// state must never carry it, since an option that comes back on its own is how
-/// it ends up on when nobody meant it to be.
+/// The options shared by `:mkrc` and the session state.
 pub(crate) fn saved_options(app: &App) -> String {
     OPTIONS
         .iter()
-        .filter(|name| **name != "danger")
         .map(|name| {
             let on = option(app, name).unwrap_or(false);
             format!("{}{name}", if on { "" } else { "no" })

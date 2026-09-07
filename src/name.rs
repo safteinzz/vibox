@@ -83,12 +83,16 @@ impl NameBuffer {
     /// The same as `0` for almost every name, and not the same for one that
     /// was typed with a leading space, which is exactly when you want it.
     pub fn jump_first_nonblank(&mut self) {
-        self.col = self
-            .text
+        self.col = self.first_nonblank().min(self.last());
+    }
+
+    /// Where `^` lands, unclamped, because an operator needs the true column:
+    /// `d^` on a name of nothing but spaces has to take all of them.
+    fn first_nonblank(&self) -> usize {
+        self.text
             .iter()
             .position(|c| !c.is_whitespace())
             .unwrap_or(0)
-            .min(self.last());
     }
 
     pub fn jump_end(&mut self) {
@@ -225,6 +229,26 @@ impl NameBuffer {
         let to = to.min(self.text.len());
         let taken: String = self.text.drain(self.col..to).collect();
         self.col = self.col.min(self.last());
+        taken
+    }
+
+    /// `d0` and `d^`: everything to the left of the cursor, back to the front
+    /// of the name or to its first non-blank.
+    ///
+    /// Exclusive like every backwards motion, so the character under the
+    /// cursor survives, and a cursor already at or before that column takes
+    /// nothing rather than deleting forwards.
+    pub fn delete_to_start(&mut self, first_nonblank: bool) -> String {
+        let from = if first_nonblank {
+            self.first_nonblank()
+        } else {
+            0
+        };
+        if from >= self.col {
+            return String::new();
+        }
+        let taken: String = self.text.drain(from..self.col).collect();
+        self.col = from;
         taken
     }
 

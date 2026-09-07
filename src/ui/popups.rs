@@ -229,7 +229,7 @@ pub(super) const HELP: &[HelpSection] = &[
         &[
             (
                 "tab, ctrl-w h/l",
-                "move between the side pane and the tracks",
+                "move between the side pane, the tracks and the lyrics",
             ),
             ("gt gT", "switch tabs in whichever pane has the keyboard"),
             ("enter", "open the folder or playlist under the cursor"),
@@ -312,23 +312,18 @@ pub(super) const HELP: &[HelpSection] = &[
         ],
     ),
     (
-        "danger mode, off by default",
+        "files, once you write",
         &[
-            (":set danger", "let vibox move, copy and delete your files"),
             (
                 "dd",
-                "cut tracks, or a folder and all of it; never put back, deleted",
+                "cut tracks, or a folder and all of it; deleted on `:w`",
             ),
             (
-                "d then p",
+                "dd then p",
                 "put them somewhere else instead: a move, like vim",
             ),
-            ("y then p", "copy them into another folder"),
+            ("yy then p", "copy them into another folder"),
             (":mkdir jazz", "a new folder under the library root"),
-            (
-                ":mkrc",
-                "keeps danger on for good, if it is on when you write it",
-            ),
         ],
     ),
     (

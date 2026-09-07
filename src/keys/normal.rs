@@ -78,6 +78,7 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('j') | KeyCode::Down => step(app, count as isize),
         KeyCode::Char('k') | KeyCode::Up => step(app, -(count as isize)),
         KeyCode::Char('g') => app.pending = Some('g'),
+        KeyCode::Char('G') if app.focus == Pane::Lyrics => app.lyrics_goto_end(true),
         KeyCode::Char('G') => {
             if app.focus == Pane::Tracks {
                 if has_count {
@@ -93,12 +94,12 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char(c @ ('H' | 'M' | 'L')) if app.focus == Pane::Tracks => {
             app.cursor_to_screen(c);
         }
-        KeyCode::Char('d') if ctrl => step(app, (app.track_h / 2) as isize),
-        KeyCode::Char('u') if ctrl => step(app, -((app.track_h / 2) as isize)),
-        KeyCode::Char('f') if ctrl => step(app, app.track_h as isize),
-        KeyCode::Char('b') if ctrl => step(app, -(app.track_h as isize)),
-        KeyCode::PageDown => step(app, app.track_h as isize),
-        KeyCode::PageUp => step(app, -(app.track_h as isize)),
+        KeyCode::Char('d') if ctrl => step(app, (page_h(app) / 2) as isize),
+        KeyCode::Char('u') if ctrl => step(app, -((page_h(app) / 2) as isize)),
+        KeyCode::Char('f') if ctrl => step(app, page_h(app) as isize),
+        KeyCode::Char('b') if ctrl => step(app, -(page_h(app) as isize)),
+        KeyCode::PageDown => step(app, page_h(app) as isize),
+        KeyCode::PageUp => step(app, -(page_h(app) as isize)),
         KeyCode::Char('e') if ctrl => scroll_view(app, count as isize),
         KeyCode::Char('y') if ctrl => scroll_view(app, -(count as isize)),
 
@@ -169,10 +170,10 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
                 step
             };
             match app.playing_track().map(|t| t.path.clone()) {
-                Some(path) => {
-                    let offset = app.lyrics.nudge(&path, delta);
-                    app.info(format!("lyrics {:+.1}s", offset as f64 / 1000.0));
-                }
+                Some(path) => match app.lyrics.nudge(&path, delta) {
+                    Some(offset) => app.info(format!("lyrics {:+.1}s", offset as f64 / 1000.0)),
+                    None => app.error("these lyrics have no timings to shift"),
+                },
                 None => app.error("nothing playing to shift the lyrics of"),
             }
         }
@@ -261,6 +262,7 @@ pub(super) fn pending_key(
 ) {
     app.count = None;
     match (prefix, key.code) {
+        ('g', KeyCode::Char('g')) if app.focus == Pane::Lyrics => app.lyrics_goto_end(false),
         ('g', KeyCode::Char('g')) => {
             if app.focus == Pane::Tracks {
                 app.goto(if has_count { count - 1 } else { 0 });
@@ -299,10 +301,12 @@ pub(super) fn pending_key(
             (Pane::Folders, Tab::Playlists) => app.delete_playlist(),
             (Pane::Folders, Tab::Folders) => app.cut_folder(),
             (Pane::Tracks, _) => delete_selection(app),
+            // Words on a page are not rows to act on.
+            (Pane::Lyrics, _) => {}
         },
         ('Z', KeyCode::Char('Z' | 'Q')) => app.quit = true,
-        ('\u{17}', KeyCode::Char('h' | 'k')) => app.focus = Pane::Folders,
-        ('\u{17}', KeyCode::Char('l' | 'j')) => app.focus = Pane::Tracks,
+        ('\u{17}', KeyCode::Char('h' | 'k')) => app.focus = left_of(app.focus),
+        ('\u{17}', KeyCode::Char('l' | 'j')) => app.focus = right_of(app),
         ('\u{17}', KeyCode::Char('w')) => toggle_pane(app),
         _ => {}
     }
@@ -310,7 +314,7 @@ pub(super) fn pending_key(
 
 /// `dd`, `d` in visual, and `x`: what they delete depends on what you are
 /// looking at. In a playlist it is the entry, in a folder it is the file, and
-/// the file case needs danger on.
+/// the file case is staged until `:w`.
 pub(super) fn delete_selection(app: &mut App) {
     if app.playlist_view.is_some() {
         app.remove_from_playlist();
@@ -319,11 +323,37 @@ pub(super) fn delete_selection(app: &mut App) {
     }
 }
 
+/// `ctrl-w w` and tab: round the panes that are actually on screen, left to
+/// right, so the lyrics join the cycle only while they are up.
 pub(super) fn toggle_pane(app: &mut App) {
     app.focus = match app.focus {
         Pane::Folders => Pane::Tracks,
-        Pane::Tracks => Pane::Folders,
+        Pane::Tracks if app.show_lyrics => Pane::Lyrics,
+        Pane::Tracks | Pane::Lyrics => Pane::Folders,
     };
+}
+
+fn left_of(focus: Pane) -> Pane {
+    match focus {
+        Pane::Folders | Pane::Tracks => Pane::Folders,
+        Pane::Lyrics => Pane::Tracks,
+    }
+}
+
+fn right_of(app: &App) -> Pane {
+    match app.focus {
+        Pane::Folders => Pane::Tracks,
+        Pane::Tracks | Pane::Lyrics if app.show_lyrics => Pane::Lyrics,
+        other => other,
+    }
+}
+
+/// What a page key moves by: the height of whichever pane has the keyboard.
+fn page_h(app: &App) -> usize {
+    match app.focus {
+        Pane::Lyrics => app.lyrics_h,
+        Pane::Folders | Pane::Tracks => app.track_h,
+    }
 }
 
 pub(super) fn step(app: &mut App, delta: isize) {
@@ -331,11 +361,16 @@ pub(super) fn step(app: &mut App, delta: isize) {
         (Pane::Tracks, _) => app.move_cursor(delta),
         (Pane::Folders, Tab::Folders) => app.move_folder(delta),
         (Pane::Folders, Tab::Playlists) => app.move_playlist(delta),
+        (Pane::Lyrics, _) => app.scroll_lyrics(delta),
     }
 }
 
 /// `ctrl-e` and `ctrl-y`: the view moves, the cursor follows only when pushed.
 pub(super) fn scroll_view(app: &mut App, delta: isize) {
+    if app.focus == Pane::Lyrics {
+        app.scroll_lyrics(delta);
+        return;
+    }
     let max_top = app.view.len().saturating_sub(app.track_h.max(1));
     app.top = (app.top as isize + delta).clamp(0, max_top as isize) as usize;
     let cur = app

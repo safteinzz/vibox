@@ -1,4 +1,11 @@
-//! Moving, copying and deleting files, all of it behind `:set danger`.
+//! Moving, copying and deleting files.
+//!
+//! None of it happens when you press the key: `dd`, `d`+`p`, `y`+`p` and
+//! `:mkdir` all queue the work, `:ch` lists exactly what is waiting and `:w` is
+//! the only thing that touches the disk. That staging is the safety, which is
+//! why the `:set danger` this module used to sit behind is gone: an arming
+//! switch you set once and forget protects nothing that a change you can read
+//! before writing does not already protect.
 
 use std::path::{Path, PathBuf};
 
@@ -15,14 +22,10 @@ impl App {
         self.cut.iter().any(|p| p == path)
     }
 
-    /// `dd` on a track with danger on: marks the files, and remembers them so
+    /// `dd` on a track: marks the files, and remembers them so
     /// a `p` somewhere else turns the deletion into a move, exactly like vim
     /// deleting text and putting it back.
     pub fn cut_tracks(&mut self) {
-        if !self.danger {
-            self.error("`dd` here needs `:set danger`; it deletes files");
-            return;
-        }
         let (a, b) = self.selection_range();
         let b = b.min(self.view.len().saturating_sub(1));
         let paths: Vec<PathBuf> = self.view[a..=b]
@@ -86,18 +89,12 @@ impl App {
         true
     }
 
-    /// `dd` on a folder row with danger on: marks the folder and everything
+    /// `dd` on a folder row: marks the folder and everything
     /// under it, subfolders included.
     ///
     /// The tracks are marked one by one rather than hidden behind the folder,
     /// so `:changes` still lists every file that is about to go.
     pub fn cut_folder(&mut self) {
-        if !self.danger {
-            self.error(
-                "`dd` on a folder needs `:set danger`; it deletes the folder and its tracks",
-            );
-            return;
-        }
         let Some((label, dir)) = self.folders.get(self.folder_cur.wrapping_sub(1)).cloned() else {
             self.error("that is the whole library, not a folder");
             return;
@@ -138,7 +135,7 @@ impl App {
         self.doomed_dirs.iter().any(|p| path.starts_with(p))
     }
 
-    /// `p` in a folder with tracks yanked: copies them in, danger mode only.
+    /// `p` in a folder with tracks yanked: copies them in.
     ///
     /// The move case is `dd` then `p`; this is the `y` then `p` case, and it is
     /// a copy for the same reason it is in vim, where the yanked text stays
@@ -146,10 +143,6 @@ impl App {
     pub fn copy_yank_here(&mut self) -> bool {
         if self.yank.is_empty() || self.playlist_view.is_some() {
             return false;
-        }
-        if !self.danger {
-            self.error("copying files here needs `:set danger`");
-            return true;
         }
         let Some(dir) = self.current_dir() else {
             self.error("no folder here to copy into");
@@ -203,10 +196,6 @@ impl App {
     /// Typing a command with a name in it is the confirmation, the way `:w
     /// file` writes in vim. Only the buffer edits wait for `:w`.
     pub fn make_dir(&mut self, name: &str) {
-        if !self.danger {
-            self.error("`:mkdir` needs `:set danger`; it writes to your library");
-            return;
-        }
         let name = name.trim();
         if name.is_empty() {
             self.error("`:mkdir` needs a name");

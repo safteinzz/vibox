@@ -46,6 +46,8 @@ impl App {
             Ok(()) => {
                 self.playing = Some(track_idx);
                 self.msg = None;
+                // New words: whatever was pinned was for the last song.
+                self.unpin_lyrics();
                 // The one place a track actually starts, so the one place the
                 // session log grows.
                 let track = &self.tracks[track_idx];

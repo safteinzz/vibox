@@ -42,13 +42,15 @@ is waiting. The batch is planned against the disk first, so a name that already
 exists or two files heading for one name stops the whole write with everything
 still pending: nothing is ever half applied.
 
-## Danger mode
+## Changing the library itself
 
-`:set danger` lets vibox change your library, and nothing else does. With it on,
-`dd` cuts tracks or a whole folder, `d` then `p` moves them, `y` then `p` copies
-them, and `:mkdir jazz` makes a folder. A cut is an edit, not an action, so a
-cut you never put back is a deletion you can still read in `:changes` first. It
-starts off every launch unless `:mkrc` keeps it, and nothing else persists it.
+It is vim, and the folder is the buffer. To move a track: `dd` it, `t` the folder
+it should live in into its own tab, `gt` over to it, `p`. `yy` instead of `dd`
+copies it rather than moving it.
+
+None of that has touched the disk. The move is an edit like any other, so
+`:changes` shows it, `u` takes it back, `:e!` throws the lot away, and `:w` is
+the only thing that ever writes.
 
 ## Playlists
 
@@ -59,10 +61,10 @@ also how you reorder one.
 
 ## Lyrics
 
-`:set lyrics` fetches from lrclib and follows the song. It only follows when the
-recording matches yours within a couple of seconds and the artist and title
-agree with your tags, so otherwise you get the words with no highlight. Off by
-default, cached on disk, `[` and `]` nudge one track's timing.
+`:set lyrics` fetches from lrclib and follows the song. When a sheet sits a few
+seconds out, `[` and `]` shift it and the correction is kept. The pane takes the
+keyboard like any other, so the usual motions scroll it. Off by default, cached
+on disk.
 
 ## Commands
 
@@ -70,7 +72,6 @@ default, cached on disk, `[` and `]` nudge one track's timing.
 :e <path>       open a directory or an m3u for this session
 :set root=~/Music   the library vibox opens on its own
 :set lyrics     lyrics pane; :set noartist hides a column, :set artist! flips it
-:set danger     let vibox move, copy and delete; off every start, `:mkrc` keeps it
 :sort artist    path, title, artist, album, duration
 :vol 70         :seek 1:30, :reload, :42 jumps to row 42
 :changes        what :w would do        :w writes it, :e! discards it
