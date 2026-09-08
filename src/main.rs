@@ -24,9 +24,29 @@ const TICK: Duration = Duration::from_millis(200);
 /// Redraw cadence while the visualiser is running.
 const FRAME: Duration = Duration::from_millis(50);
 
+/// clap's own layout with one change: `{before-help}` moves from above the
+/// description to just under `Usage:`, so the shapes block lands on top of the
+/// command list rather than on top of the screen.
+const TEMPLATE: &str =
+    "{about-with-newline}\n{usage-heading} {usage}\n\n{before-help}{all-args}{after-help}\n";
+
+/// The shapes clap cannot list, because the player is the bare invocation
+/// rather than a subcommand.
+const WAYS: &str = "\x1b[1mWays to run it (not subcommands):\x1b[0m
+  vibox           play your music directory
+                    type to filter, `:help` lists every key, `:q` quits
+  vibox [path]    the same, but on that library root for this run only";
+
+/// The rest of the block: the one thing a shape line cannot say, then what a
+/// script can expect from it, which is nothing but an exit code.
 const AFTER: &str = concat!(
-    "The library is just a directory. `:e <dir>` opens another one, `c` edits the\n\
-     filenames in it, and `:help` lists every key.",
+    "\
+The library is just a directory: `:e <dir>` opens another one and `c` edits the
+filenames in it.
+
+vibox takes over the terminal and prints nothing for a pipe; a failure names
+itself on stderr and exits non-zero.
+Run `vibox <command> --help` for a command's details.",
     "\n\n",
     env!("CARGO_PKG_REPOSITORY"),
     "\ncontributors: ",
@@ -52,13 +72,17 @@ const LONG_VERSION: &str = concat!(
     version,
     long_version = LONG_VERSION,
     about,
+    // The shapes come first: this is a bare-first binary, so the command list is
+    // the leftovers and putting it on top answers the wrong question first.
+    help_template = TEMPLATE,
+    before_help = WAYS,
     after_help = AFTER
 )]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
 
-    /// Library root to scan. Defaults to your music directory.
+    /// Library root to scan (default: your music directory)
     path: Option<PathBuf>,
 
     /// Initial sort: path, title, artist, album, duration
