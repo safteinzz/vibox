@@ -5,8 +5,6 @@ AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating pi
 
 Working brief for an AI coding agent, not documentation for people (the README covers that): the rules, invariants and gotchas needed to change this project correctly without rediscovering them.
 
-**What does not belong here.** How to write code - comments, tests, error wording, how to answer, when to commit - is not project knowledge: it comes from `~/dotfiles/development/MYRULES.md`, imported ahead of this file and outranking it. A rule that would be true in any repo is a sign it belongs there instead. Where the two genuinely contradict, ask rather than pick.
-
 ## Hard rules
 - **Where the colours land in vibox.** The line under the panes is `app.info` (green, it worked) and `app.error` (yellow, it did not), both on the same three-second `MSG_TTL` through `App::live_msg`; nothing there is ever red, and nothing in the statusline is either. The one red in the app is the `Mode::Edit` indicator, and a gate would be the other if one is ever added.
 - **Never add a dependency that needs a C library, system headers, or an external binary.** `cargo install vibox` must succeed on a bare toolchain; a build that fails on a missing header is a broken product. This is why the audio output is written against the pulseaudio wire protocol instead of using cpal.
