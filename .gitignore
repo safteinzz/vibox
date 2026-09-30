@@ -15,3 +15,4 @@ GEMINI.md
 # the `vibox` symlink and the rc the staged shell reads. demo/*.tape and
 # demo/stage.sh are the source of every README asset and are committed.
 /demo/home
+CANON.md
