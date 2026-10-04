@@ -62,7 +62,7 @@ pub(super) fn line_mode(app: &mut App, key: KeyEvent) {
             if was_search {
                 app.last_search = line.clone();
                 app.search_back = backward;
-                if !app.search(&line, backward, app.cur) {
+                if !app.search(&line, backward) {
                     app.error(format!("pattern not found: {line}"));
                 }
             } else {

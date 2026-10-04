@@ -251,10 +251,7 @@ pub(super) const HELP: &[HelpSection] = &[
             ("ctrl-e ctrl-y", "scroll the window, leave the cursor"),
             ("gp", "jump to whatever is playing"),
             ("K", "what vibox knows about this track; y copies its path"),
-            (
-                "/ ?, n N",
-                "search files, artists and albums, then repeat it",
-            ),
+            ("/ ?, n N", "search the focused list, then repeat it"),
             ("* #", "next, previous track by the artist under the cursor"),
         ],
     ),

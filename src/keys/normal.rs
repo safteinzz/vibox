@@ -118,7 +118,7 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
                 let back = c == '#';
                 app.last_search = artist.clone();
                 app.search_back = back;
-                if app.search(&artist, back, app.cur) {
+                if app.search(&artist, back) {
                     app.info(format!("searching `{artist}`, `n` for the next one"));
                 } else {
                     app.error(format!("pattern not found: {artist}"));
@@ -130,7 +130,7 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
             let pattern = app.last_search.clone();
             if pattern.is_empty() {
                 app.error("no previous search");
-            } else if !app.search(&pattern, back, app.cur) {
+            } else if !app.search(&pattern, back) {
                 app.error(format!("pattern not found: {pattern}"));
             }
         }
