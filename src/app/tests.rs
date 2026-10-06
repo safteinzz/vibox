@@ -974,3 +974,24 @@ fn undoing_a_deletion_brings_its_rename_back() {
         "and nothing is marked for deletion"
     );
 }
+
+/// vim's `ZZ` writes and then quits, but here only `:w` ever writes, so `ZZ`
+/// is `:qa`: with a change pending it has to keep vibox open, or the change a
+/// vim user trusted it to save is gone.
+#[test]
+fn zz_keeps_vibox_open_while_a_change_is_pending() {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let (mut app, _dir) = library(&["a.mp3"]);
+    app.cut_tracks();
+    for _ in 0..2 {
+        crate::keys::handle(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
+        );
+    }
+    assert!(
+        !app.quit,
+        "ZZ quit with a deletion still waiting for :w, which drops it"
+    );
+    assert!(app.unsaved(), "the pending deletion must still be there");
+}
