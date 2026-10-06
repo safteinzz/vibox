@@ -196,7 +196,9 @@ impl App {
                         audio.set_volume((v * 100.0).round() as u8);
                     }
                 }
-                Remote::Quit => self.quit = true,
+                // A desktop widget's quit is `:qa`, so it refuses while
+                // anything is unsaved like every other way out.
+                Remote::Quit => crate::excmd::run(self, "qa"),
             }
         }
     }

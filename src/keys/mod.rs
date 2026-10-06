@@ -1,7 +1,7 @@
 //! Modal key handling. Normal mode owns motions and playback, the `:` and `/`
 //! lines are just text editors that hand their contents off on Enter.
 
-use ratatui::crossterm::event::{KeyEvent, KeyEventKind};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::app::{App, Mode};
 
@@ -20,6 +20,18 @@ pub fn handle(app: &mut App, key: KeyEvent) {
     // Key release and repeat events arrive on terminals that speak the kitty
     // protocol; acting on them would double every motion.
     if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    // Ctrl-C never quits and never leaves anything, so a reflex press cannot
+    // drop what `:w` has not written; only the `:` and `/` lines take it, to
+    // cancel themselves.
+    let typing_a_line = matches!(app.mode, Mode::Command | Mode::Search);
+    if key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !typing_a_line
+    {
+        app.info("type  :q  to quit vibox");
         return;
     }
 

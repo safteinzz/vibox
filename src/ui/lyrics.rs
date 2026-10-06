@@ -5,11 +5,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, Pane};
 
-use super::widgets::dim;
+use super::widgets::{Window, dim, pane_vscrollbar, vscrollbar, window};
 
 /// Wraps one lyric at the pane width, indenting the runover so a long line
 /// still reads as one line and not as two lyrics.
@@ -166,8 +166,17 @@ pub(super) fn draw_lyrics(frame: &mut Frame, app: &mut App, area: Rect) {
         .title(lyrics_title(app, area.width as usize));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let (rows, top) = lyrics_window(app, inner.width as usize, inner.height as usize);
-    frame.render_widget(Paragraph::new(rows).scroll((top, 0)), inner);
+    let height = inner.height as usize;
+    let (mut rows, mut top) = lyrics_window(app, inner.width as usize, height);
+    // The pane ends at the screen's edge, so a scrollbar takes a column from
+    // the words, which are wrapped again to the narrower width.
+    let mut body = inner;
+    if rows.len() > height {
+        body.width = inner.width.saturating_sub(1);
+        (rows, top) = lyrics_window(app, body.width as usize, height);
+    }
+    frame.render_widget(Paragraph::new(rows).scroll((top, 0)), body);
+    pane_vscrollbar(frame, inner, app.lyrics_rows, top as usize);
 }
 
 /// `lyrics (lrclib)`, crediting whoever wrote the words, and how to shift them
@@ -209,22 +218,24 @@ pub(super) fn sync_hint(app: &App) -> Option<String> {
 
 /// Same content, for a terminal too narrow to give lyrics their own pane.
 pub(super) fn draw_lyrics_popup(frame: &mut Frame, app: &mut App, area: Rect) {
-    let w = 50.min(area.width.saturating_sub(2));
-    let h = (area.height * 3 / 4).max(3);
-    let popup = Rect {
-        x: (area.width.saturating_sub(w)) / 2,
-        y: (area.height.saturating_sub(h)) / 2,
-        width: w,
-        height: h,
-    };
-
-    let block = Block::bordered().title(format!(
-        " lyrics ({}): :set nolyrics to close ",
-        crate::lyrics::SOURCE
-    ));
-    let inner = block.inner(popup);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(block, popup);
-    let (rows, top) = lyrics_window(app, inner.width as usize, inner.height as usize);
-    frame.render_widget(Paragraph::new(rows).scroll((top, 0)), inner);
+    // Not a window that takes the keyboard: the motions still reach the pane
+    // behind it, and only the option closes it, so its key row names that.
+    let tall = usize::from(area.height * 3 / 4).saturating_sub(5).max(1);
+    let Window { frame: popup, body } = window(
+        frame,
+        area,
+        &format!("lyrics ({})", crate::lyrics::SOURCE),
+        ":set nolyrics close",
+        44,
+        tall,
+    );
+    let (rows, top) = lyrics_window(app, body.width as usize, body.height as usize);
+    frame.render_widget(Paragraph::new(rows).scroll((top, 0)), body);
+    vscrollbar(
+        frame,
+        popup,
+        app.lyrics_rows,
+        top as usize,
+        body.height as usize,
+    );
 }

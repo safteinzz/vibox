@@ -6,8 +6,15 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
 
-/// Keys for whichever window is open: info, changes, or help.
+/// Keys for whichever window is open: info, changes, history or help.
 pub(super) fn window_key(app: &mut App, key: KeyEvent) {
+    // `gg` is two presses, so the first `g` waits here and anything else drops it.
+    let after_g = app.pending.take() == Some('g');
+    if key.code == KeyCode::Char('g') && !after_g && !app.show_info {
+        app.pending = Some('g');
+        return;
+    }
+
     // The info window takes the keyboard while it is up.
     if app.show_info {
         match key.code {
@@ -67,6 +74,7 @@ pub(super) fn window_key(app: &mut App, key: KeyEvent) {
 
     // The history window scrolls, since a long session outgrows any popup.
     if app.show_history {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let step = app.count.take().unwrap_or(1);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => app.history_top += step,
@@ -75,6 +83,8 @@ pub(super) fn window_key(app: &mut App, key: KeyEvent) {
             }
             KeyCode::Char('g') | KeyCode::Home => app.history_top = 0,
             KeyCode::Char('G') | KeyCode::End => app.history_top = usize::MAX,
+            KeyCode::Char('d') if ctrl => app.history_top += 10,
+            KeyCode::Char('u') if ctrl => app.history_top = app.history_top.saturating_sub(10),
             KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter => {
                 app.show_history = false;
             }
@@ -98,7 +108,7 @@ pub(super) fn help_key(app: &mut App, key: KeyEvent) {
     };
 
     match key.code {
-        KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::F(1) => {
+        KeyCode::Char('q' | 'Q') | KeyCode::Esc => {
             app.show_help = false;
             app.help_scroll = 0;
         }
@@ -106,8 +116,8 @@ pub(super) fn help_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up => scroll(app, -1),
         KeyCode::Char('d') if ctrl => scroll(app, 10),
         KeyCode::Char('u') if ctrl => scroll(app, -10),
-        KeyCode::Char('g') => app.help_scroll = 0,
-        KeyCode::Char('G') => app.help_scroll = last,
+        KeyCode::Char('g') | KeyCode::Home => app.help_scroll = 0,
+        KeyCode::Char('G') | KeyCode::End => app.help_scroll = last,
         _ => {}
     }
 }

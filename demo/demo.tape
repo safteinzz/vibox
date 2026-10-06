@@ -2,7 +2,7 @@
 # off a screen: VHS replays these keystrokes in a headless terminal and draws
 # the gif itself, so it re-renders identically every release.
 #
-#   cd demo && ./stage.sh up && vhs demo.tape
+#   ./render.sh demo
 #
 # One beat per thing vibox does, in the order you would meet them, and each beat
 # finishes before the next starts. It writes for real (`:w` renames four files)

@@ -5,7 +5,6 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, Mode, Pane, Tab};
 
-#[allow(clippy::too_many_lines)] // it is a keymap: one arm per key reads better flat
 pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let count = app.count.unwrap_or(1);
@@ -27,9 +26,21 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    let mut clear_count = true;
+    // Tried in this order, so a guarded arm (`ctrl-d` before `d`, `ctrl-r`
+    // before `r`) is still met before the plain key it shadows.
+    let handled = mode_key(app, key, ctrl)
+        || motion_key(app, key, ctrl, count, has_count)
+        || search_key(app, key)
+        || playback_key(app, key, ctrl, count, has_count)
+        || change_key(app, key);
+    if handled {
+        app.count = None;
+    }
+}
+
+/// Modes, the `K` window and the panes.
+fn mode_key(app: &mut App, key: KeyEvent, ctrl: bool) -> bool {
     match key.code {
-        // ---- modes -------------------------------------------------------
         KeyCode::Char(':') => {
             app.mode = Mode::Command;
             app.line_prefix = ':';
@@ -57,8 +68,6 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
                 app.visual_anchor = Some(app.cur);
             }
         }
-        KeyCode::Char('c') if ctrl => app.info("type  :q  to quit vibox"),
-        KeyCode::F(1) => app.show_help = !app.show_help,
         // vim's `K`: tell me about the thing under the cursor.
         KeyCode::Char('K') if app.focus == Pane::Tracks => {
             if app.current_track().is_some() {
@@ -70,11 +79,16 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
 
         KeyCode::Char('q') if app.show_help => app.show_help = false,
 
-        // ---- panes -------------------------------------------------------
         KeyCode::Tab => toggle_pane(app),
         KeyCode::Char('w') if ctrl => app.pending = Some('\u{17}'),
+        _ => return false,
+    }
+    true
+}
 
-        // ---- motions -----------------------------------------------------
+/// Motions, which take a count.
+fn motion_key(app: &mut App, key: KeyEvent, ctrl: bool, count: usize, has_count: bool) -> bool {
+    match key.code {
         KeyCode::Char('j') | KeyCode::Down => step(app, count as isize),
         KeyCode::Char('k') | KeyCode::Up => step(app, -(count as isize)),
         KeyCode::Char('g') => app.pending = Some('g'),
@@ -102,8 +116,14 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
         KeyCode::PageUp => step(app, -(page_h(app) as isize)),
         KeyCode::Char('e') if ctrl => scroll_view(app, count as isize),
         KeyCode::Char('y') if ctrl => scroll_view(app, -(count as isize)),
+        _ => return false,
+    }
+    true
+}
 
-        // ---- search ------------------------------------------------------
+/// `*`, `#`, `n` and `N`.
+fn search_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
         // vim's `*` and `#`: the thing under the cursor becomes the search.
         // Here that is the artist, since "what else do I have by them" is the
         // question you ask while browsing.
@@ -134,8 +154,14 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
                 app.error(format!("pattern not found: {pattern}"));
             }
         }
+        _ => return false,
+    }
+    true
+}
 
-        // ---- playback ----------------------------------------------------
+/// Playing, seeking, volume, repeat and shuffle, and opening from the side pane.
+fn playback_key(app: &mut App, key: KeyEvent, ctrl: bool, count: usize, has_count: bool) -> bool {
+    match key.code {
         KeyCode::Enter => {
             if app.focus == Pane::Folders {
                 // Enter opens, on both tabs: moving the cursor never changes
@@ -213,8 +239,14 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
             };
             app.line_cur = app.line.chars().count();
         }
+        _ => return false,
+    }
+    true
+}
 
-        // ---- playlists ---------------------------------------------------
+/// Yanking, deleting, putting, undoing and renaming.
+fn change_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
         KeyCode::Char('y') => {
             if app.mode == Mode::Visual {
                 app.yank_selection();
@@ -239,17 +271,12 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('u') => app.undo(),
 
-        // ---- editing -----------------------------------------------------
         KeyCode::Char('c') if app.focus == Pane::Tracks => app.begin_edit(),
         KeyCode::Char('c') if app.focus == Pane::Folders => app.begin_sidebar_edit(),
         KeyCode::Char('Z') => app.pending = Some('Z'),
-
-        _ => clear_count = false,
+        _ => return false,
     }
-
-    if clear_count {
-        app.count = None;
-    }
+    true
 }
 
 /// Second key of a two key sequence.
@@ -304,7 +331,10 @@ pub(super) fn pending_key(
             // Words on a page are not rows to act on.
             (Pane::Lyrics, _) => {}
         },
-        ('Z', KeyCode::Char('Z' | 'Q')) => app.quit = true,
+        // vim's `ZZ` writes first, but here only `:w` writes, so it is `:qa` and
+        // refuses while anything is pending; `ZQ` is `:qa!`, as in vim.
+        ('Z', KeyCode::Char('Z')) => crate::excmd::run(app, "qa"),
+        ('Z', KeyCode::Char('Q')) => crate::excmd::run(app, "qa!"),
         ('\u{17}', KeyCode::Char('h' | 'k')) => app.focus = left_of(app.focus),
         ('\u{17}', KeyCode::Char('l' | 'j')) => app.focus = right_of(app),
         ('\u{17}', KeyCode::Char('w')) => toggle_pane(app),

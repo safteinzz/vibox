@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Mode, Pane, Renaming, Tab};
 
 use super::tracks::{name_selection_at, row_with_cursor};
-use super::widgets::{cursor_style, dim, editing_style, truncate};
+use super::widgets::{cursor_style, dim, editing_style, pane_vscrollbar, truncate};
 
 pub(super) const FOLDER_W: u16 = 30;
 pub(super) fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -59,8 +59,15 @@ pub(super) fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         head,
     );
 
+    // The list's rows, out to the right border the scrollbar sits on.
+    let beside = Rect {
+        y: inner.y,
+        height: inner.height,
+        ..area
+    };
     if app.tab == Tab::Playlists {
         draw_playlists(frame, app, inner, focused);
+        pane_vscrollbar(frame, beside, app.playlists.len(), app.pl_top);
         return;
     }
 
@@ -135,6 +142,8 @@ pub(super) fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         app.cursor_screen = cursor_at;
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    // Row 0 is `* everything`, ahead of the folders themselves.
+    pane_vscrollbar(frame, beside, app.folders.len() + 1, app.folder_top);
 }
 
 /// The saved playlists, listed by name.

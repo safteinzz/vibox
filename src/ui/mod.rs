@@ -1,8 +1,8 @@
 //! Rendering. Two panes, a progress line, a statusline and the command line,
 //! in that order, exactly like a neovim window with a lualine under it.
 //!
-//! No images, no glyphs outside plain box drawing: whatever font the terminal
-//! is already using is the font vibox uses.
+//! No images, no glyphs outside plain box drawing and the arrows that spell keys:
+//! whatever font the terminal is already using is the font vibox uses.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
@@ -83,21 +83,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .map_or(0.0, crate::player::Audio::level);
         crate::matrix::overlay(frame, &mut app.matrix, level);
     }
+    // Windows leave the message row alone, so what a key said under one, such
+    // as ctrl-c's `:q`, is still on screen.
+    let over = main.union(status);
     if app.show_lyrics && lyrics_w == 0 {
-        draw_lyrics_popup(frame, app, frame.area());
+        draw_lyrics_popup(frame, app, over);
     }
     if app.show_info {
-        draw_info(frame, app, frame.area());
+        draw_info(frame, app, over);
     }
     if app.show_changes {
-        let area = frame.area();
-        draw_changes(frame, app, area);
+        draw_changes(frame, app, over);
     }
     if app.show_history {
-        let area = frame.area();
-        draw_history(frame, app, area);
+        draw_history(frame, app, over);
     }
     if app.show_help {
-        draw_help(frame, app, frame.area());
+        draw_help(frame, app, over);
     }
 }
