@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Mode, Pane, Renaming};
 use crate::library::fmt_duration;
 
-use super::widgets::{cursor_style, dim, editing_style, pane_vscrollbar, truncate};
+use super::widgets::{cursor_style, dim, editing_style, truncate};
 
 /// Cells before the first column: the sign, a space, the line number, a space.
 ///
@@ -92,18 +92,6 @@ pub(super) fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     let [head, area] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     app.track_h = area.height as usize;
     app.scroll_to_cursor();
-    let rows_area = area;
-    // No border to carry a scrollbar, so it takes the pane's last column, and
-    // the header narrows with the rows to stay over its data.
-    let (head, area) = if app.view.len() > area.height as usize {
-        let narrower = |r: Rect| Rect {
-            width: r.width.saturating_sub(1),
-            ..r
-        };
-        (narrower(head), narrower(area))
-    } else {
-        (head, area)
-    };
 
     let dur_w = duration_width(app);
     let cols = columns(app, area.width as usize, dur_w);
@@ -282,7 +270,6 @@ pub(super) fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         app.cursor_screen = cursor_at;
     }
     frame.render_widget(Paragraph::new(lines), area);
-    pane_vscrollbar(frame, rows_area, app.view.len(), app.top);
 }
 
 /// Splits a rendered row so one cell carries the cursor.
