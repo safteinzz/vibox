@@ -35,29 +35,21 @@ never modified.
 
 ## Nothing is written until `:w`
 
-Renames, moves, copies, cuts and playlist edits sit in memory until you write
-them. `:changes` is what `:w` would do, as a character diff. `u` and `ctrl-r`
-walk the pending set, `:e!` throws the lot away, and `:q` refuses while anything
-is waiting. The batch is planned against the disk first, so a name that already
-exists or two files heading for one name stops the whole write with everything
-still pending: nothing is ever half applied.
+Renames, moves, copies and playlist edits sit in memory until you write them,
+and `:changes` shows what `:w` would do. The batch is checked against the disk
+first, so a clash stops the whole write and nothing is ever half applied.
 
 ## Changing the library itself
 
-It is vim, and the folder is the buffer. To move a track: `dd` it, `t` the folder
-it should live in into its own tab, `gt` over to it, `p`. `yy` instead of `dd`
-copies it rather than moving it.
-
-None of that has touched the disk. The move is an edit like any other, so
-`:changes` shows it, `u` takes it back, `:e!` throws the lot away, and `:w` is
-the only thing that ever writes.
+It is vim, and the folder is the buffer: `dd` a track, `t` its new folder into
+a tab, `gt` over and `p`, or `yy` to copy it instead. The move is an edit like
+any other, so `u` takes it back and only `:w` writes it.
 
 ## Playlists
 
-m3u files in `~/.local/share/vibox/playlists`. Filling one is a yank and a put:
-`t` a folder into its own tab, `V` and `j` to select, `y`, `gt` to the playlist,
-`p`. `dd` cuts a track out and `p` puts it back where you want it, so that is
-also how you reorder one.
+Filling a playlist is a yank and a put: `t` a folder into its own tab, `V` and
+`j` to select, `y`, `gt` to the playlist, `p`. `dd` and `p` reorder it the same
+way.
 
 ## Lyrics
 
@@ -82,10 +74,12 @@ on disk.
 :q  :q!         close the tab, or leave without writing
 ```
 
-`:set` works the way vim's does, and `:set` on its own lists everything. Volume,
-shuffle and repeat come back the way you left them. vibox is also an MPRIS
-player, so the media keys reach it from anywhere, and so does
-`playerctl -p vibox play-pause`.
+`:set` works the way vim's does and lists everything on its own, and `:help`
+lists every key.
+
+vibox takes over the terminal and prints nothing for a pipe, but it is an MPRIS
+player, so the media keys and `playerctl -p vibox play-pause` reach it from
+anywhere.
 
 ## Where it keeps things
 
@@ -96,9 +90,8 @@ player, so the media keys reach it from anywhere, and so does
 ~/.local/share/vibox/lyrics/         the lyric cache, dropped by :clearcache
 ```
 
-Nothing else is written anywhere until you type `:w`. A crash or a kill loses
-whatever was pending, which is also the way out of a mess you would rather not
-apply.
+Nothing else is written until you type `:w`, so a crash or a kill loses only
+what was pending.
 
 ## Compatibility
 
