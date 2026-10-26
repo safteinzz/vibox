@@ -76,7 +76,8 @@ struct Shared {
     /// Set when the server finished playing a track by itself.
     finished: AtomicBool,
     paused: AtomicBool,
-    /// Volume as a gain in thousandths, so it can live in an atomic.
+    /// Volume as a gain, held as the bits of an `f32` so it can live in an
+    /// atomic.
     gain: AtomicU32,
     /// Loudness of the last chunk sent, in thousandths, for the visualiser.
     level: AtomicU32,
@@ -103,7 +104,6 @@ impl Audio {
     pub fn new() -> Result<Audio> {
         let (sock, version) = connect()?;
         let shared = Arc::new(Shared::default());
-        shared.gain.store(800, Ordering::Relaxed);
 
         let (tx, rx) = channel();
         let thread_shared = Arc::clone(&shared);
@@ -116,13 +116,15 @@ impl Audio {
             })
             .context("cannot start the audio thread")?;
 
-        Ok(Audio {
+        let audio = Audio {
             tx,
             shared,
             volume: 80,
             muted: false,
             current: None,
-        })
+        };
+        audio.push_gain();
+        Ok(audio)
     }
 
     /// Opens and decodes on the caller's side so a broken file is reported
@@ -227,11 +229,11 @@ impl Audio {
 
     fn push_gain(&self) {
         let gain = if self.muted {
-            0
+            0.0
         } else {
-            u32::from(self.volume) * 10
+            gain_of(self.volume)
         };
-        self.shared.gain.store(gain, Ordering::Relaxed);
+        self.shared.gain.store(gain.to_bits(), Ordering::Relaxed);
     }
 
     fn send(&self, cmd: Cmd) -> Result<()> {
@@ -239,6 +241,15 @@ impl Audio {
             .send(cmd)
             .map_err(|_| anyhow!("the audio thread is gone; restart vibox"))
     }
+}
+
+/// The gain a volume percentage plays at.
+///
+/// Loudness is heard as a ratio, so a linear gain made each step at the bottom
+/// a leap and each step at the top a nudge. The cube is the curve pulseaudio's
+/// own percentages use, so 50 here sounds like 50 in a mixer.
+fn gain_of(volume: u8) -> f32 {
+    (f32::from(volume) / 100.0).powi(3)
 }
 
 // ---- the socket ---------------------------------------------------------
@@ -574,7 +585,7 @@ fn feed(
     shared: &Arc<Shared>,
     version: u16,
 ) -> Result<()> {
-    let gain = shared.gain.load(Ordering::Relaxed) as f32 / 1000.0;
+    let gain = f32::from_bits(shared.gain.load(Ordering::Relaxed));
     buf.clear();
     buf.reserve(want);
 
