@@ -17,6 +17,10 @@ categories = ["command-line-utilities", "multimedia::audio"]
 # download; the rest are local working files that are not part of the crate.
 exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/", "readme-assets/", "demo/"]
 
+# The programs vibox starts, for tools that ask what an install needs beside its libraries.
+[package.metadata]
+runs = []
+
 [dependencies]
 anyhow = "1"                                    # error plumbing, context on every failure the user can act on
 clap = { version = "4", features = ["derive"] } # argv parsing and help text
