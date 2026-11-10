@@ -8,14 +8,14 @@ rust-version = "1.89"
 description = "a jukebox you exit with :q - a cli music player whose library is a vim buffer, nothing written until :w"
 authors = ["Pablo Antonio Hernández Hernández (safteinzz)"]
 license = "AGPL-3.0-only"
-repository = "https://gitlab.com/safteinzz/vibox"
+repository = "https://github.com/safteinzz/vibox"
 readme = "README.md"
 keywords = ["music", "player", "tui", "vim", "modal"]
 categories = ["command-line-utilities", "multimedia::audio"]
 # README screenshots are fetched over the network by crates.io via absolute raw
 # URLs, never read out of the package, so shipping them would only bloat every
-# download; the rest are local working files that are not part of the crate.
-exclude = ["TODO-LIST.md", "CLAUDE.md", "stuffnottocommit/", "readme-assets/", "demo/"]
+# download.
+exclude = ["readme-assets/", "demo/"]
 
 # The programs vibox starts, for tools that ask what an install needs beside its libraries.
 [package.metadata]
@@ -35,6 +35,7 @@ rodio = { version = "0.22", default-features = false, features = [
     "flac",
     "mp3",
     "mp4",
+    "symphonia-alac",
     "vorbis",
     "wav",
 ] }

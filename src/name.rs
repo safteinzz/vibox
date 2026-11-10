@@ -5,17 +5,19 @@
 //! editing a folder name cannot show up on a track row, which is exactly what
 //! happened when the two panes shared one map keyed by row.
 
-/// What kind of run a character belongs to, the way vim splits a line.
+/// What kind of run a character belongs to: a word of letters and digits, a
+/// run of punctuation, or the whitespace between them. Shared with the `:` and
+/// `/` lines, so a word means the same thing in a name and on a command line.
 ///
-/// Punctuation is a word of its own, so `w` on `ABBA - As` stops on the dash.
+/// Punctuation is a word of its own, so `w` on `Lumen - Low` stops on the dash.
 #[derive(PartialEq, Eq, Clone, Copy)]
-enum Class {
+pub(crate) enum Class {
     Space,
     Word,
     Punct,
 }
 
-fn class(c: char) -> Class {
+pub(crate) fn class(c: char) -> Class {
     if c.is_whitespace() {
         Class::Space
     } else if c.is_alphanumeric() || c == '_' {
@@ -161,6 +163,14 @@ impl NameBuffer {
 
     // ---- entering insert --------------------------------------------------
 
+    /// Puts the insert point at `at`, which may be one past the last
+    /// character. A change deletes and then inserts where the deleted text
+    /// began; the deletes clamp to the last character, as normal mode must,
+    /// and inserting from there typed in front of the letter that was left.
+    pub fn insert_at(&mut self, at: usize) {
+        self.col = at.min(self.text.len());
+    }
+
     pub fn append_here(&mut self) {
         self.col = (self.col + 1).min(self.text.len());
     }
@@ -219,7 +229,41 @@ impl NameBuffer {
         taken
     }
 
-    /// `dw`, and `cw` which stops at the end of the word the way vim's does.
+    /// `cw`, which is not `dw` then insert: on a word it changes to the end of
+    /// that word, the letter under the cursor alone when that is the last one,
+    /// and on a blank it changes the blanks up to the next word.
+    /// The insert point is left where the change began.
+    pub fn change_word(&mut self, count: usize) -> String {
+        let at = self.col;
+        if at >= self.text.len() {
+            return String::new();
+        }
+        if class(self.text[at]) == Class::Space {
+            let taken: String = (0..count.max(1)).map(|_| self.delete_word(false)).collect();
+            self.insert_at(at);
+            return taken;
+        }
+        let mut end = self.current_word_end(at);
+        for _ in 1..count {
+            self.col = end;
+            end = self.word_end();
+        }
+        let taken: String = self.text.drain(at..=end.min(self.last())).collect();
+        self.insert_at(at);
+        taken
+    }
+
+    /// The last character of the run `at` is in.
+    fn current_word_end(&self, at: usize) -> usize {
+        let kind = class(self.text[at]);
+        let mut end = at;
+        while end + 1 < self.text.len() && class(self.text[end + 1]) == kind {
+            end += 1;
+        }
+        end
+    }
+
+    /// `dw`, and `de` with `to_word_end`.
     pub fn delete_word(&mut self, to_word_end: bool) -> String {
         let to = if to_word_end {
             self.word_end() + 1
@@ -252,7 +296,7 @@ impl NameBuffer {
         taken
     }
 
-    /// `db`, and ctrl-w on a command line.
+    /// `db`, and ctrl-w while typing a name.
     pub fn delete_word_back(&mut self) -> String {
         let from = self.word_back();
         let taken: String = self.text.drain(from..self.col).collect();

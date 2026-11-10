@@ -10,14 +10,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::library::Track;
 
 /// Stamped on every cache entry. Bump it when what gets cached changes
 /// meaning: entries without the current marker are refetched rather than
 /// trusted, since an old one cannot say whether its timings were believed.
-const CACHE_MARK: &str = "[vibox:4]";
+const CACHE_MARK: &str = "[vibox:5]";
 
 /// Who the words came from, for the pane to credit. One provider today; when
 /// there are two this moves onto `Lyrics` so each result carries its own.
@@ -26,8 +26,16 @@ pub const SOURCE: &str = "lrclib";
 const AGENT: &str = concat!(
     "vibox/",
     env!("CARGO_PKG_VERSION"),
-    " (https://gitlab.com/safteinzz/vibox)"
+    " (https://github.com/safteinzz/vibox)"
 );
+
+/// How long one lookup may take, connecting included. There is one worker, so
+/// a request that never comes back would leave every later track waiting.
+const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long a lookup that failed for want of lrclib waits before the next play
+/// asks again.
+const RETRY: Duration = Duration::from_secs(60);
 
 pub enum Lyrics {
     /// Timestamped lines, in order.
@@ -46,14 +54,27 @@ struct Request {
     duration: u64,
 }
 
+/// What the worker sends back for one track: the words or why there are none,
+/// the correction kept with them, and whether the answer is lrclib's own or a
+/// failure to ask it at all.
+struct Answer {
+    path: PathBuf,
+    lyrics: Lyrics,
+    offset: i64,
+    settled: bool,
+}
+
 pub struct Fetcher {
     tx: Sender<Request>,
-    rx: Receiver<(PathBuf, Lyrics, i64)>,
+    rx: Receiver<Answer>,
     cache: HashMap<PathBuf, Lyrics>,
     /// Per file correction in milliseconds, positive meaning the words come
     /// later. A rip with a different lead-in needs this and no lookup can.
     offsets: HashMap<PathBuf, i64>,
     inflight: HashSet<PathBuf>,
+    /// Tracks whose lookup could not reach lrclib, and when, so they are
+    /// asked again later instead of being remembered as having no lyrics.
+    unsettled: HashMap<PathBuf, Instant>,
 }
 
 impl Fetcher {
@@ -65,13 +86,38 @@ impl Fetcher {
         let _ = std::thread::Builder::new()
             .name("vibox-lyrics".into())
             .spawn(move || {
+                let agent = ureq::Agent::config_builder()
+                    .timeout_global(Some(TIMEOUT))
+                    .build()
+                    .new_agent();
                 while let Ok(job) = jobs.recv() {
-                    let (found, offset) = load_cached(&job.path).unwrap_or_else(|| {
-                        let fetched = fetch(&job);
-                        store_cached(&job.path, &fetched, 0);
-                        (fetched, 0)
-                    });
-                    if results.send((job.path, found, offset)).is_err() {
+                    let answer = match load_cached(&job.path) {
+                        Some((lyrics, offset)) => Answer {
+                            path: job.path,
+                            lyrics,
+                            offset,
+                            settled: true,
+                        },
+                        None => {
+                            // Only lrclib's own answer is worth keeping: a
+                            // lookup that never reached it says nothing about
+                            // whether the track has words.
+                            let (lyrics, settled) = match fetch(&agent, &job) {
+                                Ok(lyrics) => {
+                                    store_cached(&job.path, &lyrics, 0);
+                                    (lyrics, true)
+                                }
+                                Err(why) => (Lyrics::Missing(why), false),
+                            };
+                            Answer {
+                                path: job.path,
+                                lyrics,
+                                offset: 0,
+                                settled,
+                            }
+                        }
+                    };
+                    if results.send(answer).is_err() {
                         return;
                     }
                 }
@@ -83,15 +129,28 @@ impl Fetcher {
             cache: HashMap::new(),
             offsets: HashMap::new(),
             inflight: HashSet::new(),
+            unsettled: HashMap::new(),
         }
     }
 
     /// Queues a fetch unless the track is already cached or already queued.
+    ///
+    /// A track whose last lookup could not reach lrclib is asked again once
+    /// `RETRY` has passed.
     pub fn request(&mut self, track: &Track) {
+        if let Some(when) = self.unsettled.get(&track.path)
+            && when.elapsed() >= RETRY
+        {
+            self.unsettled.remove(&track.path);
+            self.cache.remove(&track.path);
+        }
         if self.cache.contains_key(&track.path) || self.inflight.contains(&track.path) {
             return;
         }
-        if track.title.trim().is_empty() && track.artist.trim().is_empty() {
+        // An untagged file's title is its filename, and a search by filename
+        // with no artist to check the hits against is how a wrong sheet gets
+        // synced to a track.
+        if track.artist.trim().is_empty() && track.title == track.file {
             self.cache.insert(
                 track.path.clone(),
                 Lyrics::Missing("no artist or title tag to search with".into()),
@@ -114,10 +173,31 @@ impl Fetcher {
 
     /// Moves whatever the worker finished into the cache. Called every tick.
     pub fn poll(&mut self) {
-        while let Ok((path, lyrics, offset)) = self.rx.try_recv() {
-            self.inflight.remove(&path);
-            self.offsets.insert(path.clone(), offset);
-            self.cache.insert(path, lyrics);
+        while let Ok(answer) = self.rx.try_recv() {
+            self.inflight.remove(&answer.path);
+            if !answer.settled {
+                self.unsettled.insert(answer.path.clone(), Instant::now());
+            }
+            self.offsets.insert(answer.path.clone(), answer.offset);
+            self.cache.insert(answer.path, answer.lyrics);
+        }
+    }
+
+    /// Follows a file that was renamed or moved, so its words and its `[ ]`
+    /// correction stay with it instead of being fetched again under a name the
+    /// cache has never seen.
+    pub fn moved(&mut self, from: &Path, to: &Path) {
+        if let Some(lyrics) = self.cache.remove(from) {
+            self.cache.insert(to.to_path_buf(), lyrics);
+        }
+        if let Some(offset) = self.offsets.remove(from) {
+            self.offsets.insert(to.to_path_buf(), offset);
+        }
+        if let Some(when) = self.unsettled.remove(from) {
+            self.unsettled.insert(to.to_path_buf(), when);
+        }
+        if let (Some(old), Some(new)) = (cache_path(from), cache_path(to)) {
+            let _ = std::fs::rename(old, new);
         }
     }
 
@@ -159,6 +239,7 @@ impl Fetcher {
     pub fn clear(&mut self) -> std::io::Result<usize> {
         self.cache.clear();
         self.offsets.clear();
+        self.unsettled.clear();
 
         let Some(dir) = cache_dir() else {
             return Ok(0);
@@ -189,7 +270,8 @@ impl Default for Fetcher {
 
 // ---- network ------------------------------------------------------------
 
-fn fetch(job: &Request) -> Lyrics {
+/// lrclib's answer for one track, or why it could not be asked.
+fn fetch(agent: &ureq::Agent, job: &Request) -> Result<Lyrics, String> {
     let exact = format!(
         "https://lrclib.net/api/get?artist_name={}&track_name={}&album_name={}&duration={}",
         encode(&job.artist),
@@ -198,12 +280,12 @@ fn fetch(job: &Request) -> Lyrics {
         job.duration
     );
 
-    match get_json(&exact) {
-        Ok(body) => return from_json(&body, job.duration),
+    match get_json(agent, &exact) {
+        Ok(body) => return Ok(from_json(&body, job.duration)),
         // A miss on the exact match is normal: the duration or the album
         // rarely lines up with what someone else uploaded.
         Err(FetchError::NotFound) => {}
-        Err(FetchError::Other(e)) => return Lyrics::Missing(e),
+        Err(FetchError::Unreachable(why)) => return Err(why),
     }
 
     let search = format!(
@@ -211,13 +293,15 @@ fn fetch(job: &Request) -> Lyrics {
         encode(&job.artist),
         encode(&job.title)
     );
-    match get_json(&search) {
-        Ok(body) => match pick(&body, job) {
+    match get_json(agent, &search) {
+        Ok(body) => Ok(match pick(&body, job) {
             Some(hit) => from_json(&hit, job.duration),
             None => Lyrics::Missing("no lyrics on lrclib for this track".into()),
-        },
-        Err(FetchError::NotFound) => Lyrics::Missing("no lyrics on lrclib for this track".into()),
-        Err(FetchError::Other(e)) => Lyrics::Missing(e),
+        }),
+        Err(FetchError::NotFound) => {
+            Ok(Lyrics::Missing("no lyrics on lrclib for this track".into()))
+        }
+        Err(FetchError::Unreachable(why)) => Err(why),
     }
 }
 
@@ -244,7 +328,7 @@ const NAME_TOLERANCE: f64 = 0.3;
 /// seconds out is no evidence at all against its timestamps.
 ///
 /// lrclib's search is a substring match on both fields, so asking for `Wax` and
-/// `Destiny` also answers with `Nightmares on Wax - Date With Destiny`. Ranking
+/// `Harbour` also answers with `Tides of Glass - Night Harbour Lights`. Ranking
 /// those on duration alone picks whichever wrong song happens to run about as
 /// long as ours, which is how a confidently wrong lyric sheet gets synced to a
 /// track. The name has to agree before the duration is worth consulting.
@@ -271,8 +355,8 @@ fn close(theirs: &str, ours: &str) -> bool {
     distance(&theirs, &ours) as f64 / longest as f64 <= NAME_TOLERANCE
 }
 
-/// Lowercase, without bracketed asides or punctuation: `Destiny (Original
-/// Version)` and `destiny` are the same title written twice.
+/// Lowercase, without bracketed asides or punctuation: `Harbour (Original
+/// Version)` and `harbour` are the same title written twice.
 fn normalize(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0usize;
@@ -320,26 +404,41 @@ fn gap(hit: &serde_json::Value, ours: u64) -> f64 {
 }
 
 enum FetchError {
+    /// lrclib answered, and it has nothing for these words.
     NotFound,
-    Other(String),
+    /// lrclib was not reached or did not answer, said for the pane.
+    Unreachable(String),
 }
 
-fn get_json(url: &str) -> Result<serde_json::Value, FetchError> {
-    let response = ureq::get(url)
+/// What the pane says when lrclib could not be asked.
+fn unreachable(why: &str) -> FetchError {
+    FetchError::Unreachable(format!(
+        "cannot reach lrclib ({why}), vibox asks again on a later play"
+    ))
+}
+
+fn get_json(agent: &ureq::Agent, url: &str) -> Result<serde_json::Value, FetchError> {
+    let response = agent
+        .get(url)
         .header("User-Agent", AGENT)
         .call()
         .map_err(|e| match e {
-            ureq::Error::StatusCode(404) => FetchError::NotFound,
-            other => FetchError::Other(format!("lrclib: {other}")),
+            // A lookup lrclib cannot make with what we sent, such as a blank
+            // field, is a miss like any other, so the search still gets a go.
+            ureq::Error::StatusCode(400 | 404) => FetchError::NotFound,
+            ureq::Error::StatusCode(code) => unreachable(&format!("it answered {code}")),
+            ureq::Error::Timeout(_) => unreachable("it did not answer in time"),
+            ureq::Error::HostNotFound => unreachable("no network, or no name server"),
+            ureq::Error::Io(io) => unreachable(&crate::reason::of(&io)),
+            _ => unreachable("the connection failed"),
         })?;
 
     response
         .into_body()
         .read_to_string()
-        .map_err(|e| FetchError::Other(format!("lrclib: {e}")))
+        .map_err(|_| unreachable("the answer was cut short"))
         .and_then(|text| {
-            serde_json::from_str(&text)
-                .map_err(|e| FetchError::Other(format!("lrclib sent something unreadable: {e}")))
+            serde_json::from_str(&text).map_err(|_| unreachable("it sent something unreadable"))
         })
 }
 
@@ -406,8 +505,12 @@ fn parse_with_offset(text: &str) -> (Lyrics, i64) {
             offset = value.trim().trim_start_matches('+').parse().unwrap_or(0);
             continue;
         }
-        match split_timestamp(line) {
-            Some((at, words)) => timed.push((at, words.to_string())),
+        match split_timestamps(line) {
+            // A chorus written once with every time it comes round is sung at
+            // each of them.
+            Some((stamps, words)) => {
+                timed.extend(stamps.into_iter().map(|at| (at, words.to_string())));
+            }
             None => plain.push(line.trim_end().to_string()),
         }
     }
@@ -421,17 +524,32 @@ fn parse_with_offset(text: &str) -> (Lyrics, i64) {
     (lyrics, offset)
 }
 
-/// `[01:23.45] words` into the offset and the words.
-fn split_timestamp(line: &str) -> Option<(Duration, &str)> {
-    let rest = line.strip_prefix('[')?;
-    let (stamp, words) = rest.split_once(']')?;
+/// `[01:23.45] words`, or `[00:12.00][00:45.00] words`, into every time the
+/// line is sung and the words.
+fn split_timestamps(line: &str) -> Option<(Vec<Duration>, &str)> {
+    let mut rest = line;
+    let mut stamps = Vec::new();
+    while let Some(after) = rest.strip_prefix('[') {
+        let Some((stamp, tail)) = after.split_once(']') else {
+            break;
+        };
+        let Some(at) = timestamp(stamp) else {
+            break;
+        };
+        stamps.push(at);
+        rest = tail;
+    }
+    (!stamps.is_empty()).then(|| (stamps, rest.trim()))
+}
+
+/// `01:23.45` as a time. `None` for anything that is not one, such as an
+/// `ar:` tag, and for a value no time can be, since this text comes from
+/// whoever uploaded it and `[00:nan]` parses as a float.
+fn timestamp(stamp: &str) -> Option<Duration> {
     let (minutes, seconds) = stamp.split_once(':')?;
     let minutes: u64 = minutes.trim().parse().ok()?;
     let seconds: f64 = seconds.trim().parse().ok()?;
-    Some((
-        Duration::from_secs_f64(minutes as f64 * 60.0 + seconds),
-        words.trim(),
-    ))
+    Duration::try_from_secs_f64(minutes as f64 * 60.0 + seconds).ok()
 }
 
 // ---- disk cache ---------------------------------------------------------
@@ -547,59 +665,66 @@ mod tests {
     #[test]
     fn a_search_that_found_only_other_songs_picks_nothing() {
         let hits = [
-            hit("Nightmares on Wax", "Date With Destiny", 308.0),
-            hit("Wax", "Call It Destiny", 243.0),
+            hit("Tides of Glass", "Night Harbour Lights", 308.0),
+            hit("Glass", "Call It Harbour", 243.0),
         ];
-        assert_eq!(chosen(&hits, &asking("Wax", "Destiny", 306)), None);
+        assert_eq!(chosen(&hits, &asking("Glass", "Harbour", 306)), None);
     }
 
     #[test]
     fn the_song_we_asked_for_beats_a_closer_running_time() {
         let hits = [
-            hit("Nightmares on Wax", "Date With Destiny", 306.0),
-            hit("Wax", "Destiny", 280.0),
+            hit("Tides of Glass", "Night Harbour Lights", 306.0),
+            hit("Glass", "Harbour", 280.0),
         ];
         assert_eq!(
-            chosen(&hits, &asking("Wax", "Destiny", 306)).as_deref(),
-            Some("Destiny")
+            chosen(&hits, &asking("Glass", "Harbour", 306)).as_deref(),
+            Some("Harbour")
         );
     }
 
     #[test]
     fn case_punctuation_and_whatever_is_in_the_brackets_do_not_matter() {
-        let hits = [hit("SFDK", "Despacito Pero Voy", 287.0)];
-        let job = asking("sfdk", "Despacito pero voy (Original Mix)", 288);
+        let hits = [hit("LMNO", "Slowly But Still", 287.0)];
+        let job = asking("lmno", "Slowly but still (Original Mix)", 288);
         assert!(chosen(&hits, &job).is_some());
     }
 
     #[test]
     fn the_closest_running_time_wins_among_the_ones_that_are_the_song() {
         let hits = [
-            hit("ABBA", "The Day Before You Came", 360.0),
-            hit("ABBA", "The Day Before You Came", 349.0),
-            hit("ABBA", "The Day Before You Came", 320.0),
+            hit("Lumen Drift", "The Night Before The Tide", 360.0),
+            hit("Lumen Drift", "The Night Before The Tide", 349.0),
+            hit("Lumen Drift", "The Night Before The Tide", 320.0),
         ];
         let body = serde_json::Value::Array(hits.to_vec());
-        let got = pick(&body, &asking("ABBA", "The Day Before You Came", 350)).unwrap();
+        let got = pick(
+            &body,
+            &asking("Lumen Drift", "The Night Before The Tide", 350),
+        )
+        .unwrap();
         assert_eq!(got.get("duration").unwrap().as_f64(), Some(349.0));
     }
 
     #[test]
     fn an_entry_with_no_words_in_it_is_never_the_answer() {
         let empty = serde_json::json!({
-            "artistName": "ABBA",
-            "trackName": "Waterloo",
+            "artistName": "Lumen Drift",
+            "trackName": "Low Water",
             "duration": 166.0,
         });
-        assert_eq!(chosen(&[empty], &asking("ABBA", "Waterloo", 166)), None);
+        assert_eq!(
+            chosen(&[empty], &asking("Lumen Drift", "Low Water", 166)),
+            None
+        );
     }
 
     /// A file with no artist tag still has a title to go on, and refusing every
     /// hit because a tag is blank would leave it with nothing.
     #[test]
     fn a_tag_we_do_not_have_does_not_get_a_vote() {
-        let hits = [hit("Alphaville", "Forever Young", 227.0)];
-        assert!(chosen(&hits, &asking("", "Forever Young", 227)).is_some());
+        let hits = [hit("Paper Coast", "Always Young", 227.0)];
+        assert!(chosen(&hits, &asking("", "Always Young", 227)).is_some());
     }
 
     fn timed(seconds: &[u64]) -> Vec<(Duration, String)> {
@@ -622,7 +747,7 @@ mod tests {
     /// difference, and they need something to shift.
     #[test]
     fn a_hit_whose_duration_disagrees_keeps_its_timestamps() {
-        let mut entry = hit("Ice Cube", "Gangsta Rap Made Me Do It", 326.0);
+        let mut entry = hit("Low Ceiling", "The Rhyme Made Me Do It", 326.0);
         entry["syncedLyrics"] = serde_json::json!("[00:03.41] first\n[04:26.78] last");
         entry["plainLyrics"] = serde_json::json!("first\nlast");
 

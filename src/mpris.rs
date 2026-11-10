@@ -30,6 +30,8 @@ pub enum Remote {
     Prev,
     /// Relative seek, in microseconds, as the spec sends it.
     Seek(i64),
+    /// Absolute position in the playing track, in microseconds.
+    SetPosition(i64),
     Volume(f64),
     Quit,
 }
@@ -49,6 +51,8 @@ pub struct Status {
     pub volume: f64,
     pub can_next: bool,
     pub can_prev: bool,
+    /// Bumped on every seek, so the watcher knows to send `Seeked`.
+    pub seeks: u64,
 }
 
 /// The handle the ui keeps: commands coming in, status going out.
@@ -119,6 +123,12 @@ pub fn start() -> Result<Mpris> {
                     let _ = zbus::block_on(guard.can_go_next_changed(emitter));
                     let _ = zbus::block_on(guard.can_go_previous_changed(emitter));
                 }
+                // A widget extrapolates the position from the last one it was
+                // told, so a jump it is not told about is drawn as if it had
+                // never happened.
+                if now.seeks != last.seeks {
+                    let _ = zbus::block_on(Player::seeked(emitter, now.pos_us as i64));
+                }
                 drop(guard);
                 last = now;
             }
@@ -180,9 +190,11 @@ impl Root {
         "vibox".into()
     }
 
+    /// None: `OpenUri` is not implemented, and the spec reads an empty list
+    /// as "do not send me any".
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<String> {
-        vec!["file".into()]
+        Vec::new()
     }
 
     #[zbus(property)]
@@ -246,12 +258,22 @@ impl Player {
         self.send(Remote::Seek(offset_us));
     }
 
-    fn set_position(&self, _track: ObjectPath<'_>, position_us: i64) {
-        let now = self.status().pos_us as i64;
-        self.send(Remote::Seek(position_us - now));
+    /// The spec's absolute seek, ignored when it names a track that is not
+    /// the one playing, as it says to.
+    fn set_position(&self, track: ObjectPath<'_>, position_us: i64) {
+        let status = self.status();
+        if track.as_str() == track_id(&status.path) && position_us >= 0 {
+            self.send(Remote::SetPosition(position_us));
+        }
     }
 
     fn open_uri(&self, _uri: String) {}
+
+    #[zbus(signal)]
+    async fn seeked(
+        emitter: &zbus::object_server::SignalEmitter<'_>,
+        position: i64,
+    ) -> zbus::Result<()>;
 
     #[zbus(property)]
     fn playback_status(&self) -> String {
@@ -269,11 +291,7 @@ impl Player {
         let s = self.status();
         let mut meta = HashMap::new();
 
-        // The track id has to be a valid object path, so hash the file into one.
-        let id = s.path.to_string_lossy().bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(u64::from(b))
-        });
-        if let Ok(path) = ObjectPath::try_from(format!("/org/mpris/vibox/track/{id}"))
+        if let Ok(path) = ObjectPath::try_from(track_id(&s.path))
             && let Ok(v) = OwnedValue::try_from(Value::from(path))
         {
             meta.insert("mpris:trackid".into(), v);
@@ -355,6 +373,15 @@ impl Player {
     fn can_control(&self) -> bool {
         true
     }
+}
+
+/// The track id for a file, which has to be a valid object path, so the path
+/// is hashed into one.
+fn track_id(path: &std::path::Path) -> String {
+    let id = path.to_string_lossy().bytes().fold(0u64, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(u64::from(b))
+    });
+    format!("/org/mpris/vibox/track/{id}")
 }
 
 /// `file:///home/me/a b.mp3`, with the characters that break url parsers escaped.

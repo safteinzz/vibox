@@ -161,7 +161,7 @@ pub(super) fn anchor(old: &[char], new: &[char]) -> Option<(usize, usize, usize)
     (best.2 >= MIN_ANCHOR).then_some(best)
 }
 
-/// Colour by what the line would do:/// Colour by what the line would do:/// Colour by what the line would do: green makes something, blue moves or
+/// Colour by what the line would do: green makes something, blue moves or
 /// renames it, red takes it away.
 pub(super) fn change_style(line: &str) -> Style {
     let colour = match line.split_whitespace().next() {

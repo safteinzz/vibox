@@ -100,7 +100,17 @@ pub(super) fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
         let editing = row == app.folder_cur
             && matches!(app.mode, Mode::Edit | Mode::EditInsert)
             && matches!(app.renaming(), Some(Renaming::Folder(_)));
-        let label = renamed.unwrap_or(label);
+        // A rename changes the last part of the label: a nested folder keeps
+        // the parents it is shown under.
+        let parents = match label.rfind('/') {
+            Some(at) if renamed.is_some() => label[..=at].to_string(),
+            _ => String::new(),
+        };
+        let label = match renamed {
+            Some(name) => format!("{parents}{name}"),
+            None => label,
+        };
+        let skip = parents.chars().count();
         let doomed = row > 0
             && app
                 .folders
@@ -117,14 +127,14 @@ pub(super) fn draw_folders(frame: &mut Frame, app: &mut App, area: Rect) {
             style = style.fg(Color::Red).add_modifier(Modifier::CROSSED_OUT);
         }
         if editing {
-            let col = app.name_col();
+            let col = skip + app.name_col();
             if app.mode == Mode::EditInsert {
                 let before: String = label.chars().take(col).collect();
                 let x = inner.x + u16::try_from(before.width()).unwrap_or(0);
                 cursor_at = Some((x.min(inner.right().saturating_sub(1)), inner.y + shown));
                 lines.push(Line::styled(truncate(&label, w), style));
             } else {
-                let picked = name_selection_at(app, 0, 0);
+                let picked = name_selection_at(app, skip, 0);
                 lines.push(row_with_cursor(
                     &truncate(&label, w),
                     col,
@@ -165,13 +175,10 @@ pub(super) fn draw_playlists(frame: &mut Frame, app: &mut App, area: Rect, focus
     }
 
     let lines: Vec<Line> = (app.pl_top..(app.pl_top + area.height as usize))
-        .filter_map(|row| app.playlists.get(row).map(|(name, _)| (row, name)))
-        .map(|(row, name)| {
-            let doomed = app
-                .playlists
-                .get(row)
-                .is_some_and(|(_, path)| app.is_doomed(path));
-            let renamed = app.shown_name(&Renaming::Playlist(name.clone()));
+        .filter_map(|row| app.playlists.get(row).map(|(name, path)| (row, name, path)))
+        .map(|(row, name, path)| {
+            let doomed = app.is_doomed(path);
+            let renamed = app.shown_name(&Renaming::Playlist(path.clone()));
             let editing = row == app.pl_cur
                 && matches!(app.mode, Mode::Edit | Mode::EditInsert)
                 && matches!(app.renaming(), Some(Renaming::Playlist(_)));

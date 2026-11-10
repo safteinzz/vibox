@@ -33,7 +33,8 @@ pub(super) fn normal_mode(app: &mut App, key: KeyEvent) {
         || search_key(app, key)
         || playback_key(app, key, ctrl, count, has_count)
         || change_key(app, key);
-    if handled {
+    // A prefix keeps the count for the key that completes it: `5gg`, `3dd`.
+    if handled && app.pending.is_none() {
         app.count = None;
     }
 }
@@ -58,14 +59,18 @@ fn mode_key(app: &mut App, key: KeyEvent, ctrl: bool) -> bool {
         KeyCode::Esc => {
             app.exit_visual();
             app.msg = None;
-            app.show_help = false;
         }
         KeyCode::Char('v' | 'V') => {
             if app.mode == Mode::Visual {
                 app.exit_visual();
-            } else {
+            } else if app.focus == Pane::Tracks {
                 app.mode = Mode::Visual;
                 app.visual_anchor = Some(app.cur);
+            } else {
+                // A selection is of tracks, and one anchored on the track list
+                // while the keys move the sidebar would act on rows nobody
+                // picked.
+                app.error("visual selects tracks: `tab` to the track list first");
             }
         }
         // vim's `K`: tell me about the thing under the cursor.
@@ -76,8 +81,6 @@ fn mode_key(app: &mut App, key: KeyEvent, ctrl: bool) -> bool {
                 app.error("no track here");
             }
         }
-
-        KeyCode::Char('q') if app.show_help => app.show_help = false,
 
         KeyCode::Tab => toggle_pane(app),
         KeyCode::Char('w') if ctrl => app.pending = Some('\u{17}'),
@@ -101,7 +104,7 @@ fn motion_key(app: &mut App, key: KeyEvent, ctrl: bool, count: usize, has_count:
                     app.goto(usize::MAX);
                 }
             } else {
-                app.move_folder(isize::MAX / 2);
+                step(app, isize::MAX / 2);
             }
         }
         KeyCode::Char('z') => app.pending = Some('z'),
@@ -263,9 +266,13 @@ fn change_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('x') if app.focus == Pane::Tracks => delete_selection(app),
         // `p` puts what you have: cut files move, yanked files copy, and in a
-        // playlist the yank goes in as entries.
+        // playlist the yank goes in as entries and nothing on disk moves.
         KeyCode::Char('p') => {
-            if !app.move_cut_here() && !app.copy_yank_here() {
+            // Into the open playlist, unless the sidebar has the keyboard on
+            // its folders, which is a folder to put files in.
+            let on_a_folder = app.focus == Pane::Folders && app.tab == Tab::Folders;
+            let into_playlist = app.playlist_view.is_some() && !on_a_folder;
+            if into_playlist || (!app.move_cut_here() && !app.copy_yank_here()) {
                 app.paste_into_playlist();
             }
         }
@@ -294,7 +301,7 @@ pub(super) fn pending_key(
             if app.focus == Pane::Tracks {
                 app.goto(if has_count { count - 1 } else { 0 });
             } else {
-                app.move_folder(isize::MIN / 2);
+                step(app, isize::MIN / 2);
             }
         }
         // `gp` jumps to whatever is playing, wherever it scrolled off to.
@@ -322,12 +329,21 @@ pub(super) fn pending_key(
                 app.cycle_tab(if c == 't' { 1 } else { -1 });
             }
         }
-        ('z', KeyCode::Char(c @ ('z' | 't' | 'b'))) => app.scroll_cursor_to(c),
-        ('y', KeyCode::Char('y')) => app.yank_selection(),
+        ('z', KeyCode::Char(c @ ('z' | 't' | 'b'))) => match app.focus {
+            Pane::Tracks => app.scroll_cursor_to(c),
+            Pane::Folders => app.scroll_sidebar_to(c),
+            Pane::Lyrics => {}
+        },
+        ('y', KeyCode::Char('y')) if app.focus == Pane::Tracks => {
+            let start = app.cur;
+            over_rows(app, count, App::yank_selection);
+            // `yy` leaves the cursor where it was, whatever the count.
+            app.goto(start);
+        }
         ('d', KeyCode::Char('d')) => match (app.focus, app.tab) {
             (Pane::Folders, Tab::Playlists) => app.delete_playlist(),
             (Pane::Folders, Tab::Folders) => app.cut_folder(),
-            (Pane::Tracks, _) => delete_selection(app),
+            (Pane::Tracks, _) => over_rows(app, count, delete_selection),
             // Words on a page are not rows to act on.
             (Pane::Lyrics, _) => {}
         },
@@ -340,6 +356,17 @@ pub(super) fn pending_key(
         ('\u{17}', KeyCode::Char('w')) => toggle_pane(app),
         _ => {}
     }
+}
+
+/// Runs a row operator over `count` rows from the cursor down, which is what
+/// a count in front of `dd` or `yy` means.
+fn over_rows(app: &mut App, count: usize, act: impl FnOnce(&mut App)) {
+    if count > 1 && app.mode == Mode::Normal && !app.view.is_empty() {
+        app.visual_anchor = Some(app.cur);
+        app.mode = Mode::Visual;
+        app.cur = (app.cur + count - 1).min(app.view.len() - 1);
+    }
+    act(app);
 }
 
 /// `dd`, `d` in visual, and `x`: what they delete depends on what you are
@@ -395,32 +422,18 @@ pub(super) fn step(app: &mut App, delta: isize) {
     }
 }
 
-/// `ctrl-e` and `ctrl-y`: the view moves, the cursor follows only when pushed.
+/// `ctrl-e` and `ctrl-y`: the focused pane's window moves, and the cursor
+/// follows only when pushed.
 pub(super) fn scroll_view(app: &mut App, delta: isize) {
-    if app.focus == Pane::Lyrics {
-        app.scroll_lyrics(delta);
-        return;
+    match app.focus {
+        Pane::Lyrics => app.scroll_lyrics(delta),
+        Pane::Folders => app.scroll_sidebar(delta),
+        Pane::Tracks => app.scroll_tracks(delta),
     }
-    let max_top = app.view.len().saturating_sub(app.track_h.max(1));
-    app.top = (app.top as isize + delta).clamp(0, max_top as isize) as usize;
-    let cur = app
-        .cur
-        .clamp(app.top, app.top + app.track_h.saturating_sub(1));
-    app.goto(cur);
 }
 
 pub(super) fn seek(app: &mut App, delta: i64) {
-    let Some(audio) = app.audio.as_ref() else {
-        app.error("no audio device: playback is disabled");
-        return;
-    };
-    if !audio.has_track() {
-        app.error("nothing playing");
-        return;
-    }
-    if let Err(e) = audio.seek_by(delta) {
-        app.error(format!("{e}"));
-    }
+    app.seek_by_ms(delta.saturating_mul(1000));
 }
 
 pub(super) fn volume(app: &mut App, delta: i32) {

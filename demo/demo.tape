@@ -14,6 +14,8 @@ Set Shell bash
 Set FontFamily "JetBrainsMono NF"
 Set Theme "Catppuccin Mocha"
 Set FontSize 15
+# 1400 rather than 1240: with the lyrics pane open, 1240 cuts nearly every
+# artist and many file names in the track list short.
 Set Width 1400
 Set Height 620
 Set Padding 20
@@ -23,8 +25,8 @@ Set TypingSpeed 55ms
 Hide
 # `exec`, so a stage that refuses to open takes the terminal with it: without it
 # the script exits, the outer shell survives, and every keystroke after this
-# lands in the *real* home - which is how a README image ends up showing
-# somebody's actual connections.
+# lands in the *real* home, which is how a README image ends up showing
+# somebody's actual music.
 Type "exec ./stage.sh shell"
 Enter
 Sleep 2s
@@ -145,7 +147,9 @@ Sleep 3.5s
 # ===========================================================================
 # 8 - playlists are m3u files, and each opens in its own tab
 # ===========================================================================
-Tab
+# ctrl-w h rather than Tab: with the lyrics up, Tab goes to the lyrics pane.
+Ctrl+W
+Type "h"
 Sleep 500ms
 Type "gt"
 Sleep 800ms
@@ -157,7 +161,8 @@ Sleep 1.5s
 # ===========================================================================
 # 9 - a jukebox you exit with :q
 # ===========================================================================
-Type ":q"
+# `:qa`, since `:q` would only close the playlist's tab.
+Type ":qa"
 Sleep 400ms
 Enter
 Sleep 1.5s

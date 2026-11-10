@@ -23,9 +23,8 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Ctrl-C never quits and never leaves anything, so a reflex press cannot
-    // drop what `:w` has not written; only the `:` and `/` lines take it, to
-    // cancel themselves.
+    // ctrl-c cancels the `:` and `/` lines; anywhere else it only says how to
+    // quit.
     let typing_a_line = matches!(app.mode, Mode::Command | Mode::Search);
     if key.code == KeyCode::Char('c')
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -35,10 +34,10 @@ pub fn handle(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // A window that is up owns the keyboard, whatever mode opened it. `:ch`
-    // from inside a rename used to draw the popup while h and l still edited
-    // the name behind it.
-    if app.show_info || app.show_changes || app.show_help || app.show_history {
+    // Windows get every key before the mode does: `:ch` opened from inside a
+    // rename used to leave `h` and `l` editing the name behind it.
+    if app.alert.is_some() || app.show_info || app.show_changes || app.show_help || app.show_history
+    {
         window_key(app, key);
         return;
     }

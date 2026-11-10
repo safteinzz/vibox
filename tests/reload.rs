@@ -10,12 +10,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use vibox::app::App;
-use vibox::library::{QUIET, SortKey};
+use vibox::library::SortKey;
 
 /// An empty file with an audio extension is a track: the scan falls back to
 /// the filename when there are no tags to read.
 fn touch(dir: &Path, name: &str) {
     fs::write(dir.join(name), b"").expect("the temp dir should be writable");
+}
+
+/// The library at `dir` with no sound server, no session bus and playlists of
+/// its own, so a test touches nothing of the machine it runs on.
+fn offline(dir: &Path) -> App {
+    App::offline(dir.to_path_buf(), SortKey::Path, dir.join(".playlists"))
+        .expect("a temp dir of empty tracks should open")
 }
 
 fn paths(app: &App, rows: &[usize]) -> Vec<PathBuf> {
@@ -29,7 +36,7 @@ fn a_rescan_keeps_the_playing_track_and_its_queue() {
         touch(dir.path(), name);
     }
 
-    let mut app = App::new(dir.path().to_path_buf(), SortKey::Path, QUIET).unwrap();
+    let mut app = offline(dir.path());
     // What `play_cursor` does: the view as it stands becomes the queue.
     app.queue = app.view.clone();
     app.qpos = 2;
@@ -72,7 +79,7 @@ fn a_playing_track_that_left_the_library_stops_being_the_playing_track() {
         touch(dir.path(), name);
     }
 
-    let mut app = App::new(dir.path().to_path_buf(), SortKey::Path, QUIET).unwrap();
+    let mut app = offline(dir.path());
     app.queue = app.view.clone();
     app.qpos = 1;
     app.playing = app.view.get(1).copied();

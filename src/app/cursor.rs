@@ -44,6 +44,64 @@ impl App {
         self.top = self.top.min(max_top);
     }
 
+    /// `ctrl-e` and `ctrl-y` in the track list: the window moves by `delta`
+    /// rows and the cursor stays where it is until the window would push it,
+    /// then keeps `SCROLLOFF` rows from the edge.
+    ///
+    /// The cursor is settled here rather than through `scroll_to_cursor`,
+    /// which would pull the window straight back to a cursor near the top.
+    pub fn scroll_tracks(&mut self, delta: isize) {
+        if self.view.is_empty() {
+            return;
+        }
+        let h = self.track_h.max(1);
+        let max_top = self.view.len().saturating_sub(h);
+        self.top = (self.top as isize + delta).clamp(0, max_top as isize) as usize;
+        let pad = SCROLLOFF.min(h.saturating_sub(1) / 2);
+        let low = if self.top == 0 { 0 } else { self.top + pad };
+        let high = if self.top == max_top {
+            self.view.len() - 1
+        } else {
+            (self.top + h).saturating_sub(1 + pad)
+        };
+        self.cur = self.cur.clamp(low, high.max(low)).min(self.view.len() - 1);
+    }
+
+    /// `ctrl-e` and `ctrl-y` with the sidebar focused.
+    pub fn scroll_sidebar(&mut self, delta: isize) {
+        let h = self.folder_h.max(1);
+        let (rows, top, cur) = match self.tab {
+            Tab::Folders => (
+                self.folders.len() + 1,
+                &mut self.folder_top,
+                &mut self.folder_cur,
+            ),
+            Tab::Playlists => (self.playlists.len(), &mut self.pl_top, &mut self.pl_cur),
+        };
+        let max_top = rows.saturating_sub(h);
+        *top = (*top as isize + delta).clamp(0, max_top as isize) as usize;
+        *cur = (*cur).clamp(*top, (*top + h).saturating_sub(1).max(*top));
+    }
+
+    /// `zz`, `zt` and `zb` with the sidebar focused.
+    pub fn scroll_sidebar_to(&mut self, where_: char) {
+        let h = self.folder_h.max(1);
+        let (rows, top, cur) = match self.tab {
+            Tab::Folders => (
+                self.folders.len() + 1,
+                &mut self.folder_top,
+                self.folder_cur,
+            ),
+            Tab::Playlists => (self.playlists.len(), &mut self.pl_top, self.pl_cur),
+        };
+        *top = match where_ {
+            't' => cur,
+            'b' => cur + 1 - h.min(cur + 1),
+            _ => cur.saturating_sub(h / 2),
+        }
+        .min(rows.saturating_sub(h));
+    }
+
     /// `zz`, `zt`, `zb`: move the view, not the cursor.
     pub fn scroll_cursor_to(&mut self, where_: char) {
         let h = self.track_h.max(1);

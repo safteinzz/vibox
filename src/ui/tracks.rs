@@ -64,8 +64,8 @@ pub(super) fn duration_width(app: &App) -> usize {
 }
 
 pub(super) fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Tab bar on top when more than one view is open, then the sticky header.
-    // Always shown, even with one tab: naming the view beats guessing it.
+    // The tab bar on top, then the sticky header. The bar is there even with
+    // one tab: naming the view beats guessing it.
     let labels = app.tab_labels();
     let area = {
         let [bar, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -117,11 +117,11 @@ pub(super) fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.view.is_empty() {
         // An empty playlist is waiting to be filled; an empty library is a
         // different problem, so they get different instructions.
-        let msg = if let Some(name) = app.playlist_view.clone() {
+        let msg = if let Some(name) = app.playlist_name() {
             vec![
                 Line::styled(format!("  `{name}` is empty"), dim()),
                 Line::from(""),
-                Line::styled("  gt then t     open a folder in its own tab", dim()),
+                Line::styled("  tab gt t      open a folder in its own tab", dim()),
                 Line::styled("  V then y      pick the tracks you want", dim()),
                 Line::styled("  gt then p     bring them back here", dim()),
                 Line::styled("  :w            save it", dim()),
@@ -272,7 +272,6 @@ pub(super) fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Splits a rendered row so one cell carries the cursor.
 /// The name's selection moved into the coordinates of the row it is drawn in:
 /// shifted right by whatever sits in front of the name, and left by however
 /// far the name has scrolled inside its column.
@@ -287,6 +286,7 @@ pub(super) fn name_selection_at(app: &App, offset: usize, scroll: usize) -> Opti
     ))
 }
 
+/// Splits a rendered row so one cell carries the cursor.
 pub(super) fn row_with_cursor(
     row: &str,
     at: usize,

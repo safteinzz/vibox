@@ -9,29 +9,40 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::{App, Pane};
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use super::widgets::{Window, dim, pane_vscrollbar, vscrollbar, window};
 
 /// Wraps one lyric at the pane width, indenting the runover so a long line
 /// still reads as one line and not as two lyrics.
+///
+/// Measured in cells, because a CJK glyph takes two, and a word wider than the
+/// pane, which is every line of a language written without spaces, is cut
+/// where the row ends rather than run off the edge.
 pub(super) fn wrap_lyric(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
-    if text.chars().count() < width {
+    if text.width() < width {
         return vec![format!(" {text}")];
     }
 
     let mut out: Vec<String> = Vec::new();
     let mut line = String::from(" ");
+    let indent = |out: &Vec<String>| if out.is_empty() { 1 } else { 3 };
     for word in text.split_whitespace() {
-        let indent = if out.is_empty() { 1 } else { 3 };
-        if line.chars().count() > indent && line.chars().count() + 1 + word.chars().count() > width
-        {
+        if line.width() > indent(&out) && line.width() + 1 + word.width() > width {
             out.push(std::mem::take(&mut line));
             line = "   ".to_string();
         }
-        if line.chars().count() > indent {
+        if line.width() > indent(&out) {
             line.push(' ');
         }
-        line.push_str(word);
+        for ch in word.chars() {
+            if line.width() + ch.width().unwrap_or(0) > width && line.width() > indent(&out) {
+                out.push(std::mem::take(&mut line));
+                line = "   ".to_string();
+            }
+            line.push(ch);
+        }
     }
     if line.trim().is_empty() {
         if out.is_empty() {
@@ -118,20 +129,12 @@ pub(super) fn lyric_rows(app: &App, width: usize) -> (Vec<Line<'static>>, Option
     }
 }
 
-/// Where the window sits when the pane is following rather than pinned.
-///
-/// Only a highlighted line moves it, because only a timestamp knows where we
-/// are. Words with no timings stay where they are put and are scrolled by hand
-/// (`ctrl-w l`, then `j` and `k`): guessing the position from the clock reads
-/// well for one song and drifts by the length of the intro on the next, and a
-/// page that moves on its own for a reason the user cannot see is worse than
-/// one that sits still.
-fn follow_top(rows: usize, current: Option<usize>, height: usize) -> usize {
-    let max_top = rows.saturating_sub(height);
-    match current {
-        Some(row) => row.saturating_sub(height / 2).min(max_top),
-        None => 0,
-    }
+/// The first row to show so the line being sung, `row`, sits in the middle of
+/// `height` rows. Only a timestamped line moves the pane; words without
+/// timings stay wherever they were scrolled to.
+fn follow_top(rows: usize, row: usize, height: usize) -> usize {
+    row.saturating_sub(height / 2)
+        .min(rows.saturating_sub(height))
 }
 
 /// The rows to draw and how far down them to start, and the place the pane's
@@ -146,8 +149,10 @@ fn lyrics_window(app: &mut App, width: usize, height: usize) -> (Vec<Line<'stati
     if app.focus != Pane::Lyrics {
         app.unpin_lyrics();
     }
-    if !app.lyrics_pinned {
-        app.lyrics_top = follow_top(rows.len(), current, height.max(1));
+    if !app.lyrics_pinned
+        && let Some(row) = current
+    {
+        app.lyrics_top = follow_top(rows.len(), row, height.max(1));
     }
     // A pin taken on a longer set of words, or before a resize, can be past
     // the end of these ones.

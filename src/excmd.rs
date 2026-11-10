@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::app::jobs::ScanFor;
 use crate::app::{App, Pane, Repeat};
 use crate::library::SortKey;
 
@@ -48,7 +49,7 @@ pub fn run(app: &mut App, line: &str) {
             // sitting in a different one.
             let closing_a_tab = !all && app.tabs.len() > 1;
             let blocked = if closing_a_tab {
-                app.playlist_dirty
+                app.view_edited()
             } else {
                 app.unsaved()
             };
@@ -63,29 +64,37 @@ pub fn run(app: &mut App, line: &str) {
                 app.close_tab();
             }
         }
-        // `:e!` with pending renames is vim's "throw it away and reread".
         // `:e!` is vim's "reread and lose my edits", so it drops everything
         // waiting for a `:w`, not only the name being typed.
-        "e" | "edit" | "cd" if cmd.bang && cmd.args.is_empty() => app.discard_changes(),
+        "e" | "edit" | "cd" if cmd.bang && cmd.args.is_empty() => {
+            if app.job.is_none() {
+                app.discard_changes();
+                // Then the disk, read again, for anything that changed under it.
+                let root = app.root.clone();
+                app.start_scan(root, ScanFor::Refresh);
+            } else {
+                app.discard_changes();
+            }
+        }
         "e" | "edit" | "cd" => edit(app, cmd.args, cmd.bang),
         "pwd" => {
             let root = app.root.display().to_string();
             app.info(root);
         }
-        "reload" | "scan" => match app.reload() {
-            Ok(()) => {
-                let n = app.tracks.len();
-                app.info(format!("{n} tracks"));
+        "reload" | "scan" => {
+            if refused_while_unsaved(app, "reload") {
+                return;
             }
-            Err(e) => app.error(format!("{e}")),
-        },
+            let root = app.root.clone();
+            app.start_scan(root, ScanFor::Reload);
+        }
         // One `:w` writes everything outstanding: the pending renames and the
         // playlist you changed. With a name it saves the view as a new one.
         "w" | "write" | "save" => {
             if !cmd.args.is_empty() {
-                app.save_playlist(cmd.args);
+                app.save_playlist(cmd.args, cmd.bang);
             } else {
-                app.write_all();
+                app.start_write();
             }
         }
         "vol" | "volume" => volume(app, cmd.args),
@@ -125,7 +134,7 @@ pub fn run(app: &mut App, line: &str) {
                 "all" => Repeat::All,
                 "one" | "track" => Repeat::One,
                 other => {
-                    app.error(format!("bad repeat mode `{other}` - use off, all or one"));
+                    app.error(format!("bad repeat mode `{other}`, use off, all or one"));
                     return;
                 }
             };
@@ -138,7 +147,7 @@ pub fn run(app: &mut App, line: &str) {
                 "on" | "1" => true,
                 "off" | "0" => false,
                 other => {
-                    app.error(format!("bad shuffle value `{other}` - use on or off"));
+                    app.error(format!("bad shuffle value `{other}`, use on or off"));
                     return;
                 }
             };
@@ -151,7 +160,7 @@ pub fn run(app: &mut App, line: &str) {
                 let name = key.name();
                 app.info(format!("sorted by {name}"));
             }
-            None => app.error("bad sort key - use path, title, artist, album or duration"),
+            None => app.error("bad sort key, use path, title, artist, album or duration"),
         },
         "set" | "se" => set(app, cmd.args),
         "mkrc" => mkrc(app, cmd.bang),
@@ -160,7 +169,10 @@ pub fn run(app: &mut App, line: &str) {
         "clearcache" | "clearc" => match app.lyrics.clear() {
             Ok(0) => app.info("no cached lyrics to clear"),
             Ok(n) => app.info(format!("cleared {n} cached lyrics, they refetch on play")),
-            Err(e) => app.error(format!("cannot clear the lyrics cache: {e}")),
+            Err(e) => app.error(format!(
+                "cannot clear the lyrics cache: {}",
+                crate::reason::of(&e)
+            )),
         },
         "history" | "hist" => {
             if app.played.is_empty() {
@@ -173,14 +185,19 @@ pub fn run(app: &mut App, line: &str) {
         }
         "matrix" => {
             app.matrix.on = !app.matrix.on;
-            let on = app.matrix.on;
-            app.info(if on { "wake up..." } else { "" });
+            if app.matrix.on {
+                app.info("wake up...");
+            } else {
+                app.msg = None;
+            }
         }
         "mkplaylist" | "mkpl" => app.create_playlist(cmd.args),
         "mkdir" => app.make_dir(cmd.args),
         "changes" | "ch" => app.show_changes = true,
         "h" | "help" => app.show_help = true,
-        other => app.error(format!("not a vibox command: `{other}` - see :help")),
+        other => app.error(format!(
+            "not a vibox command: `{other}`, `:help` lists them"
+        )),
     }
 }
 
@@ -195,15 +212,24 @@ fn set(app: &mut App, args: &str) {
     // `root=<path>` is the one option with a value: the library vibox opens
     // when it is started with no path.
     if let Some(rest) = args.strip_prefix("root=") {
-        let path = expand(rest.trim());
-        match app.open(&path) {
-            Ok(()) => {
-                let shown = path.display().to_string();
-                app.music = Some(path);
-                app.info(format!("library is {shown}, `:mkrc` keeps it"));
-            }
-            Err(e) => app.error(format!("{e}")),
+        let rest = rest.trim();
+        if rest.is_empty() {
+            app.error("`:set root=` needs a path: `:set root=~/Music`");
+            return;
         }
+        let path = crate::library::absolute(&expand(rest));
+        // Already open, as when the rc names the library this run started on:
+        // reading it a second time only makes the start twice as slow.
+        if path == app.root {
+            let shown = path.display().to_string();
+            app.music = Some(path);
+            app.info(format!("library is {shown}, `:mkrc` keeps it"));
+            return;
+        }
+        if refused_while_unsaved(app, "open another library") {
+            return;
+        }
+        app.start_scan(path, ScanFor::Root);
         return;
     }
     if args.trim() == "root?" {
@@ -218,6 +244,7 @@ fn set(app: &mut App, args: &str) {
     }
 
     let mut touched: Vec<String> = Vec::new();
+    let mut unknown: Vec<&str> = Vec::new();
     for word in args.split_whitespace() {
         let (name, action) = match word {
             w if w.ends_with('?') => (w.trim_end_matches('?'), '?'),
@@ -231,8 +258,7 @@ fn set(app: &mut App, args: &str) {
         // you the options written beside it. Typed by hand it still says so;
         // `load_rc` clears the line when it is the file talking.
         let Some(current) = option(app, name) else {
-            let known = OPTIONS.join(", ");
-            app.error(format!("unknown option `{name}` - try {known}"));
+            unknown.push(name);
             continue;
         };
 
@@ -253,9 +279,42 @@ fn set(app: &mut App, args: &str) {
         touched.push(format!("{}{name}", if now { "" } else { "no" }));
     }
 
+    if !unknown.is_empty() {
+        let names = unknown
+            .iter()
+            .map(|n| format!("`{n}`"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let set = if touched.is_empty() {
+            String::new()
+        } else {
+            format!("; set {}", touched.join(" "))
+        };
+        app.error(format!(
+            "unknown option {names}, the options are {}{set}",
+            OPTIONS.join(" ")
+        ));
+        return;
+    }
     // An option only lasts the session until `:mkrc` writes it, so say so
     // every time rather than expecting anyone to remember.
     app.info(format!("{} | `:mkrc` keeps these", touched.join(" ")));
+}
+
+/// Refuses a command that would throw away what `:w` has not written, since
+/// pending changes point at this library's rows. True when it refused.
+fn refused_while_unsaved(app: &mut App, what: &str) -> bool {
+    // A write still running says so, rather than asking for the write.
+    if app.busy() {
+        return true;
+    }
+    if !app.unsaved() {
+        return false;
+    }
+    app.error(format!(
+        "no write since last change: `:w` first, or `:e!` to throw it away, then {what}"
+    ));
+    true
 }
 
 /// Where the last session is remembered. This is state, not configuration, so
@@ -276,7 +335,12 @@ pub fn save_state(app: &App) {
         return;
     }
 
-    let volume = app.audio.as_ref().map_or(80, super::player::Audio::volume);
+    // A session with no sound server never knew the volume, so the one the
+    // last session saved stands rather than a made up default.
+    let volume = match app.audio.as_ref() {
+        Some(audio) => audio.volume(),
+        None => saved_volume().unwrap_or(80),
+    };
     let body = format!(
         "\" last session, overwritten on quit. edit viboxrc instead\nset {}\nvol {volume}\nshuffle {}\nrepeat {}\n",
         saved_options(app),
@@ -284,6 +348,14 @@ pub fn save_state(app: &App) {
         app.repeat.name(),
     );
     let _ = std::fs::write(path, body);
+}
+
+/// The volume the last session saved, if it saved one.
+fn saved_volume() -> Option<u8> {
+    let text = std::fs::read_to_string(state_path()?).ok()?;
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("vol "))
+        .and_then(|v| v.trim().parse().ok())
 }
 
 /// Restores the last session. Runs before the rc file, so a line the user put
@@ -310,19 +382,21 @@ pub fn rc_path() -> Option<PathBuf> {
 }
 
 /// The library named by `set root=` in the rc file, read before any state
-/// exists so startup can open it.
+/// exists so startup can open it. Read with the same parser `load_rc` runs the
+/// line with, so `se root=` names it too.
 pub fn configured_music() -> Option<PathBuf> {
     let text = std::fs::read_to_string(rc_path()?).ok()?;
     text.lines()
         .map(str::trim)
-        .filter_map(|line| line.trim_start_matches(':').strip_prefix("set root="))
-        .next_back()
-        .map(|value| expand(value.trim()))
+        .filter(|line| !line.starts_with('"'))
+        .filter_map(|line| rc_root(line.trim_start_matches(':')))
+        .map(str::trim)
+        .rfind(|value| !value.is_empty())
+        .map(|value| crate::library::absolute(&expand(value)))
 }
 
 /// Runs the rc file. Every line is an ex command without its `:`, and `"`
 /// starts a comment, the way a vimrc reads.
-/// Runs the rc file.
 ///
 /// `argv_root` is true when a library was named on the command line. That one
 /// wins for this session, so the rc's `set root=` is remembered for `:mkrc`
@@ -343,7 +417,9 @@ pub fn load_rc(app: &mut App, argv_root: bool) {
         }
         let line = line.trim_start_matches(':');
         match rc_root(line) {
-            Some(rest) if argv_root => app.music = Some(expand(rest)),
+            Some(rest) if argv_root => {
+                app.music = Some(crate::library::absolute(&expand(rest.trim())));
+            }
             _ => run(app, line),
         }
     }
@@ -360,7 +436,7 @@ fn rc_root(line: &str) -> Option<&str> {
     }
 }
 
-/// `:mkrc`, after vim's `:mkvimrc`: writes the current options back out.
+/// `:mkrc`: writes the current options back out.
 fn mkrc(app: &mut App, bang: bool) {
     let Some(path) = rc_path() else {
         app.error("cannot find a config directory to write to");
@@ -368,7 +444,7 @@ fn mkrc(app: &mut App, bang: bool) {
     };
     if path.exists() && !bang {
         let shown = path.display();
-        app.error(format!("`{shown}` exists - `:mkrc!` overwrites it"));
+        app.error(format!("`{shown}` exists, `:mkrc!` overwrites it"));
         return;
     }
 
@@ -391,7 +467,10 @@ fn mkrc(app: &mut App, bang: bool) {
         Ok(()) => app.info(format!("wrote {}", path.display())),
         Err(e) => {
             let shown = path.display();
-            app.error(format!("cannot write `{shown}`: {e}"));
+            app.fail(
+                "rc file not written",
+                format!("cannot write `{shown}`: {}", crate::reason::of(&e)),
+            );
         }
     }
 }
@@ -444,24 +523,27 @@ fn list_options(app: &App) -> String {
         .join(" ")
 }
 
-fn edit(app: &mut App, args: &str, _bang: bool) {
+/// `:e <path>`, `:e! <path>` and a bare `:e`, which rereads the library.
+///
+/// It will not throw away what `:w` has not written: `:e!` drops it first,
+/// and a plain `:e` refuses while anything is pending.
+fn edit(app: &mut App, args: &str, bang: bool) {
+    if app.job.is_some() {
+        // Says what is running, and changes nothing.
+        app.discard_changes();
+        return;
+    }
+    if bang {
+        app.discard_changes();
+    } else if refused_while_unsaved(app, "open it") {
+        return;
+    }
     let target = if args.is_empty() {
         app.root.clone()
     } else {
-        expand(args)
+        crate::library::absolute(&app.root_dir().join(expand(args)))
     };
-    match app.open(&target) {
-        Ok(()) => {
-            let n = app.tracks.len();
-            let root = app.root.display().to_string();
-            if n == 0 {
-                app.error(format!("no audio files under `{root}`"));
-            } else {
-                app.info(format!("{root}: {n} tracks"));
-            }
-        }
-        Err(e) => app.error(format!("{e}")),
-    }
+    app.start_scan(target, ScanFor::Open);
 }
 
 fn volume(app: &mut App, args: &str) {
@@ -478,7 +560,7 @@ fn volume(app: &mut App, args: &str) {
         Some(Delta::Relative(d)) => audio.nudge_volume(d as i32),
         Some(Delta::Absolute(v)) => audio.set_volume(v.clamp(0, 100) as u8),
         None => {
-            app.error(format!("bad volume `{args}` - use `:vol 70`, `:vol +5`"));
+            app.error(format!("bad volume `{args}`, use `:vol 70` or `:vol +5`"));
             return;
         }
     }
@@ -487,26 +569,12 @@ fn volume(app: &mut App, args: &str) {
 }
 
 fn seek(app: &mut App, args: &str) {
-    let Some(audio) = app.audio.as_ref() else {
-        app.error("no audio device: playback is disabled");
-        return;
-    };
-    if !audio.has_track() {
-        app.error("nothing playing");
-        return;
-    }
-    let result = match parse_seek(args) {
-        Some(Delta::Relative(d)) => audio.seek_by(d),
-        Some(Delta::Absolute(s)) => audio.seek(Duration::from_secs(s.max(0) as u64)),
-        None => {
-            app.error(format!(
-                "bad position `{args}` - use `:seek 1:30`, `:seek +30`"
-            ));
-            return;
-        }
-    };
-    if let Err(e) = result {
-        app.error(format!("{e}"));
+    match parse_seek(args) {
+        Some(Delta::Relative(d)) => app.seek_by_ms(d.saturating_mul(1000)),
+        Some(Delta::Absolute(s)) => app.seek_to(Duration::from_secs(s.max(0) as u64)),
+        None => app.error(format!(
+            "bad position `{args}`, use `:seek 1:30` or `:seek +30`"
+        )),
     }
 }
 
@@ -548,12 +616,16 @@ pub fn parse_seek(s: &str) -> Option<Delta> {
     s.parse().ok().map(Delta::Absolute)
 }
 
-/// Expands a leading `~`. Everything else is left to the filesystem.
-fn expand(arg: &str) -> PathBuf {
-    if let Some(rest) = arg.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
+/// Expands a leading `~`, alone or as `~/`. Everything else is left to the
+/// filesystem.
+pub(crate) fn expand(arg: &str) -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        if arg == "~" {
+            return home;
+        }
+        if let Some(rest) = arg.strip_prefix("~/") {
+            return home.join(rest);
+        }
     }
     PathBuf::from(arg)
 }

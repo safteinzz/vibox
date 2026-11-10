@@ -52,38 +52,63 @@ pub(super) fn edit_mode(app: &mut App, key: KeyEvent) {
         // goes with it, or it would land on the next key in normal mode.
         KeyCode::Esc => {
             app.count = None;
+            // The name joins what a job in flight is about to replace or
+            // write, so it waits, with the buffer open, until that lands.
+            if app.busy() {
+                return;
+            }
             app.commit_name();
             app.mode = Mode::Normal;
             return;
         }
         KeyCode::Char(':') => {
+            app.count = None;
             app.mode = Mode::Command;
             app.line_prefix = ':';
             app.line.clear();
             app.line_cur = 0;
             return;
         }
-        KeyCode::Char('u') => {
-            app.undo();
+        KeyCode::Char('u') if !ctrl => {
+            for _ in 0..app.count.take().unwrap_or(1) {
+                app.undo();
+            }
             return;
         }
         KeyCode::Char('r') if ctrl => {
-            app.redo();
+            for _ in 0..app.count.take().unwrap_or(1) {
+                app.redo();
+            }
             return;
         }
         KeyCode::Char('j') | KeyCode::Down if app.renaming_a_track() => {
-            app.edit_next_row(1);
+            let rows = app.count.take().unwrap_or(1) as isize;
+            if !app.busy() {
+                app.edit_next_row(rows);
+            }
             return;
         }
         KeyCode::Char('k') | KeyCode::Up if app.renaming_a_track() => {
-            app.edit_next_row(-1);
+            let rows = app.count.take().unwrap_or(1) as isize;
+            if !app.busy() {
+                app.edit_next_row(-rows);
+            }
             return;
         }
         // With a selection up these act on it instead of waiting for a motion,
         // which is what makes `vw...d` work; without one they are operators
         // and the next key is the motion, so `dw` and `yw` still read as vi.
-        KeyCode::Char(op @ ('c' | 'd' | 'y')) if !app.name_selecting() => {
+        KeyCode::Char(op @ ('c' | 'd' | 'y')) if !app.name_selecting() && !ctrl => {
             app.pending = Some(op);
+            return;
+        }
+        // A chord this buffer has no use for is not its letter.
+        KeyCode::Char(_)
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.count = None;
             return;
         }
         _ => {}
@@ -127,15 +152,32 @@ pub(super) fn edit_mode(app: &mut App, key: KeyEvent) {
         KeyCode::Char('A') => buf.append_at_end(),
         // `s` substitutes the character(s) under the cursor: same take as `x`,
         // but it drops into insert like `cl` does.
-        KeyCode::Char('x' | 's') | KeyCode::Delete => {
+        KeyCode::Char('x') | KeyCode::Delete => {
             taken = Some(gather(count, || buf.delete_here()));
         }
+        KeyCode::Char('s') => {
+            let at = buf.col();
+            taken = Some(gather(count, || buf.delete_here()));
+            buf.insert_at(at);
+        }
         KeyCode::Char('D') => taken = Some(buf.truncate_here()),
-        KeyCode::Char('C') => taken = Some(buf.truncate_here()),
+        KeyCode::Char('C') => {
+            let at = buf.col();
+            taken = Some(buf.truncate_here());
+            buf.insert_at(at);
+        }
         KeyCode::Char('S') => taken = Some(buf.clear()),
         // Only reachable with a selection up: the guard above sends the bare
         // `c` and `d` off to wait for a motion instead.
-        KeyCode::Char('c' | 'd') => taken = buf.cut_selection(),
+        KeyCode::Char(op @ ('c' | 'd')) => {
+            let start = buf.selection().map(|(lo, _)| lo);
+            taken = buf.cut_selection();
+            if op == 'c'
+                && let Some(start) = start
+            {
+                buf.insert_at(start);
+            }
+        }
         KeyCode::Char('y') => {
             taken = buf.copy_selection();
             buf.stop_visual();
@@ -199,14 +241,14 @@ pub(super) fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
 
     app.checkpoint();
     let Some(buf) = app.name_buffer() else { return };
+    let at = buf.col();
 
     let taken = match (op, key.code) {
         ('c', KeyCode::Char('c')) | ('d', KeyCode::Char('d')) => buf.clear(),
-        // vim's own quirk: `cw` changes to the end of the word, the way `ce`
-        // does, instead of eating the space after it like `dw`.
-        (_, KeyCode::Char('w' | 'e')) => gather(count, || {
-            buf.delete_word(op == 'c' || key.code == KeyCode::Char('e'))
-        }),
+        ('c', KeyCode::Char('w')) => buf.change_word(count),
+        (_, KeyCode::Char('w' | 'e')) => {
+            gather(count, || buf.delete_word(key.code == KeyCode::Char('e')))
+        }
         (_, KeyCode::Char('b')) => gather(count, || buf.delete_word_back()),
         (_, KeyCode::Char('l')) => gather(count, || buf.delete_here()),
         (_, KeyCode::Char('h')) => gather(count, || buf.delete_back()),
@@ -215,6 +257,11 @@ pub(super) fn edit_operator(app: &mut App, op: char, key: KeyEvent) {
         (_, KeyCode::Char('$')) => buf.truncate_here(),
         _ => return,
     };
+    // A change inserts where the forward deletes began, which may be past the
+    // last letter they left; the backward ones already leave the cursor there.
+    if op == 'c' && matches!(key.code, KeyCode::Char('e' | 'l' | '$')) {
+        buf.insert_at(at);
+    }
 
     if !taken.is_empty() {
         app.name_reg = taken;
@@ -242,9 +289,11 @@ pub(super) fn edit_insert(app: &mut App, key: KeyEvent) {
         _ => {}
     }
 
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     let Some(buf) = app.name_buffer() else { return };
     match key.code {
         KeyCode::Backspace => buf.backspace(),
+        KeyCode::Char('h') if ctrl => buf.backspace(),
         // Insert mode deletes do not fill the register: in vi only a normal
         // mode delete is also a yank.
         KeyCode::Delete => drop(buf.delete_here()),
@@ -254,7 +303,7 @@ pub(super) fn edit_insert(app: &mut App, key: KeyEvent) {
         KeyCode::End => buf.append_at_end(),
         KeyCode::Char('u') if ctrl => drop(buf.clear()),
         KeyCode::Char('w') if ctrl => drop(buf.delete_word_back()),
-        KeyCode::Char(c) => buf.insert(c),
+        KeyCode::Char(c) if !ctrl && !alt => buf.insert(c),
         _ => {}
     }
 }

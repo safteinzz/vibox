@@ -145,43 +145,85 @@ impl Columns {
     }
 }
 
-/// Everything waiting for a `:w`, kept in one place so undo is a snapshot of
-/// it and `:w` is the only thing that touches the disk.
 /// How long the line under the panes keeps a message before the screen goes back
-/// to saying nothing. Three seconds, the same everywhere in this family: long
-/// enough to read, short enough that it never reads as the current state.
+/// to saying nothing: long enough to read, short enough that it never reads as
+/// the current state.
 const MSG_TTL: Duration = Duration::from_secs(3);
 
+/// Everything waiting for a `:w`, kept in one place so undo is a snapshot of
+/// it and `:w` is the only thing that touches the disk.
+///
+/// A snapshot names rows by the path each has at that moment, never by index:
+/// rows leave the list and come back between snapshots, and an index then
+/// means another row. Stepping to a snapshot puts every row back where it was
+/// first, so those paths name the same rows again.
 #[derive(Clone, Default)]
 pub struct Pending {
-    pub renames: std::collections::BTreeMap<Renaming, String>,
-    pub playlist_rows: Vec<usize>,
-    pub playlist_dirty: bool,
+    pub renames: Vec<(Held, String)>,
+    pub pl_edits: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     /// Playlist files marked with `dd`.
     pub doomed: Vec<PathBuf>,
     /// Tracks marked for deletion on the next `:w`.
     pub doomed_files: Vec<PathBuf>,
+    pub replaced: Vec<Replaced>,
     /// Files cut with `dd`, waiting for a `p` to turn them into moves.
     pub cut: Vec<PathBuf>,
     pub moves: Vec<(PathBuf, PathBuf)>,
     pub copies: Vec<(PathBuf, PathBuf)>,
+    /// The rows of those copies, so undo puts one back whatever has happened
+    /// since to the row it was copied from.
+    pub copy_rows: Vec<Track>,
     /// Folders marked with `dd`, taken with everything inside them.
     pub doomed_dirs: Vec<PathBuf>,
-    /// The name being typed in the sidebar, so `u` works there as well.
-    pub sidebar_name: Option<String>,
+    /// The name being typed and what it renames, so `u` puts the text back
+    /// into the buffer it was typed in and never into another one.
+    pub typing: Option<(Held, String)>,
+}
+
+/// What a rename renames, the way a snapshot holds it: a track by its path.
+#[derive(Clone, PartialEq)]
+pub enum Held {
+    Track(PathBuf),
+    Other(Renaming),
+}
+
+/// A row that left the list because a put landed on its name while it was
+/// marked for deletion. `:w` deletes `file`, the file it showed, first: for a
+/// moved row that is still where its move starts, and a copy has none yet.
+#[derive(Clone, PartialEq)]
+pub struct Replaced {
+    pub track: Track,
+    pub file: Option<PathBuf>,
+}
+
+/// One track in the register: the row it was yanked from, followed as that
+/// row moves, and the file on disk and the name it had then, which is what a
+/// `p` copies once the row itself is gone, the way vim's register keeps what
+/// was yanked through undo.
+#[derive(Clone, Debug)]
+pub struct Yanked {
+    pub path: PathBuf,
+    pub origin: PathBuf,
+    pub name: std::ffi::OsString,
+}
+
+/// A failure that has to be read, held until it is dismissed.
+pub struct Alert {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub top: usize,
 }
 
 /// One open view: what it shows, and where you left it. Snapshotted on the way
 /// out of a tab and restored on the way back, the way vim keeps a tab page.
 #[derive(Clone)]
 pub struct ViewTab {
-    pub playlist: Option<String>,
+    /// The playlist file it shows, if it shows one.
+    pub playlist: Option<PathBuf>,
     pub folder: usize,
     pub cur: usize,
     pub top: usize,
     pub sort_key: SortKey,
-    rows: Vec<usize>,
-    dirty: bool,
 }
 
 /// What a rename is renaming. Tracks come from the list, folders and playlists
@@ -190,7 +232,8 @@ pub struct ViewTab {
 pub enum Renaming {
     Track(usize),
     Folder(PathBuf),
-    Playlist(String),
+    /// By file, since two playlists can share a name under two extensions.
+    Playlist(PathBuf),
 }
 
 /// The name being typed right now: one buffer, and what it will rename.
@@ -201,6 +244,9 @@ pub enum Renaming {
 pub struct NameEdit {
     pub buf: NameBuffer,
     pub what: Renaming,
+    /// How deep the undo stack was when the buffer opened, so the whole
+    /// rename leaves one undo step however many the typing took.
+    pub depth: usize,
 }
 
 pub struct App {
@@ -208,7 +254,7 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub sort_key: SortKey,
     pub columns: Columns,
-    /// The library opened when vibox is started with no path, from `:set music=`.
+    /// The library opened when vibox is started with no path, from `:set root=`.
     pub music: Option<PathBuf>,
     pub show_lyrics: bool,
     /// Whether the lyrics pane follows the song. Off leaves the words still and
@@ -241,9 +287,11 @@ pub struct App {
     pub playlists: Vec<(String, PathBuf)>,
     pub pl_cur: usize,
     pub pl_top: usize,
-    /// The playlist currently shown, if any. It is a view over the library, so
-    /// the folders tab keeps browsing the whole library while it is open.
-    pub playlist_view: Option<String>,
+    /// The playlist file currently shown, if any. It is a view over the
+    /// library, so the folders tab keeps browsing the whole library while it
+    /// is open.
+    pub playlist_view: Option<PathBuf>,
+    /// Its rows: the edit waiting in `pl_edits`, or what its file says.
     playlist_rows: Vec<usize>,
     /// Open views, and which one you are looking at.
     pub tabs: Vec<ViewTab>,
@@ -262,8 +310,6 @@ pub struct App {
     pub line_prefix: char,
     /// Cursor position in `line`, counted in characters.
     pub line_cur: usize,
-    /// False puts the line in its own normal mode, where hjkl and w b move.
-    pub line_insert: bool,
     pub count: Option<usize>,
     /// Half typed multi key sequence: `g`, `z`, `d`, `y` or ctrl-w.
     pub pending: Option<char>,
@@ -277,13 +323,19 @@ pub struct App {
     pub last_search: String,
     pub search_back: bool,
     pub visual_anchor: Option<usize>,
-    /// Tracks picked up by `y`, waiting for a `p` into a playlist.
-    pub yank: Vec<PathBuf>,
-    /// Playlist rows changed since the last `:w`.
-    pub playlist_dirty: bool,
+    /// Tracks picked up by `y`, waiting for a `p` into a playlist or a folder.
+    pub yank: Vec<Yanked>,
+    /// Playlists edited since the last `:w`, by file, with their rows as
+    /// edited. Kept here rather than on a tab, so an edit outlives whatever
+    /// view it was made in until `:w` saves it or `:e!` drops it.
+    pub pl_edits: std::collections::BTreeMap<PathBuf, Vec<usize>>,
     /// Playlists marked for deletion, written by `:w` like every other change.
     pub doomed: Vec<PathBuf>,
     pub doomed_files: Vec<PathBuf>,
+    /// Rows that were marked for deletion when a put landed on their name.
+    /// They leave the list, their files are deleted on `:w` before anything
+    /// lands there, and undo brings them back.
+    pub replaced: Vec<Replaced>,
     pub cut: Vec<PathBuf>,
     pub moves: Vec<(PathBuf, PathBuf)>,
     /// Yanked files waiting to be copied into a folder on the next `:w`.
@@ -295,13 +347,19 @@ pub struct App {
     pub edit: Option<NameEdit>,
     /// Renames waiting for `:w`: tracks, folders and playlists together.
     pub renames: std::collections::BTreeMap<Renaming, String>,
-    /// Set only while the sidebar is renaming something.
-    /// Overridden only by tests; `None` means the user's data directory.
+    /// Where this instance keeps playlists: `None` is the user's data
+    /// directory, and only a test points it anywhere else.
     pub playlists_dir: Option<PathBuf>,
+    /// Playlists `:w <path>` wrote outside the playlist folder, which a later
+    /// `:w` repairs along with the ones inside it.
+    pub elsewhere: Vec<PathBuf>,
 
     /// Playback order, snapshotted from the view when playback starts.
     pub queue: Vec<usize>,
     pub qpos: usize,
+    /// True once the entry playing has left the queue with nothing before
+    /// it, so `qpos` is already the track to play next.
+    qpos_next: bool,
     /// Queue positions already played, so shuffle can go back the way it came.
     history: Vec<usize>,
     /// Queue positions shuffle has not played yet this cycle. Refilled, minus
@@ -309,6 +367,14 @@ pub struct App {
     /// heard once before any of them repeat.
     shuffle_bag: Vec<usize>,
     pub playing: Option<usize>,
+    /// The track playing when its row left the list while it plays, because
+    /// a put replaced it or `:w` deleted its file: the sound thread still
+    /// plays it, so the statusline still shows it.
+    pub playing_gone: Option<Track>,
+    /// The file the sound thread plays, where it is on disk now. A rescan
+    /// finds the playing row by it, since the row may show the file under a
+    /// name a pending change gives it, or have left the list.
+    playing_file: Option<PathBuf>,
     pub repeat: Repeat,
     pub shuffle: bool,
 
@@ -316,9 +382,7 @@ pub struct App {
     /// Absent on a machine with no session bus; media keys just do nothing then.
     pub mpris: Option<Mpris>,
     /// The line under the panes: what just happened, and whether it failed.
-    /// Green when it worked, yellow when it did not, and gone after `MSG_TTL`,
-    /// which is the same three seconds every other tool in this family gives a
-    /// status line.
+    /// Green when it worked, yellow when it did not, and gone after `MSG_TTL`.
     pub msg: Option<(String, bool)>,
     /// When `msg` was set, so it can expire instead of sitting there looking
     /// like it is still current.
@@ -334,6 +398,8 @@ pub struct App {
     /// First line of the log on screen, clamped by the renderer.
     pub history_top: usize,
     pub show_info: bool,
+    /// First row of the `K` window on screen, clamped by the renderer.
+    pub info_top: usize,
     /// How far `:changes` is panned sideways, in cells.
     pub changes_pan: usize,
     /// First row shown, for a batch taller than the popup.
@@ -341,17 +407,48 @@ pub struct App {
     pub show_changes: bool,
     pub show_help: bool,
     pub help_scroll: usize,
+    /// A failure too long for the message row, up until it is dismissed.
+    pub alert: Option<Alert>,
+    /// A scan or a `:w` running off the input thread, landed every tick.
+    pub job: Option<jobs::Job>,
+    /// How many seeks there have been, so the desktop can be told about each
+    /// one: a position that jumps is otherwise read as the clock running on.
+    pub seeks: u64,
+    /// Width of the message row, written by the renderer every frame, so a
+    /// failure can tell whether it fits there or needs a box.
+    pub width: usize,
     pub quit: bool,
     rng: u64,
 }
 
 impl App {
+    /// The player: the library at `root`, the sound server, and the media keys.
     pub fn new(root: PathBuf, sort_key: SortKey, on: library::Report) -> Result<App> {
         let (audio, audio_err) = match Audio::new() {
             Ok(a) => (Some(a), None),
-            Err(e) => (None, Some(format!("{e}"))),
+            Err(e) => (None, Some(crate::reason::chain(&e))),
         };
+        let mut app = App::build(root, sort_key, on, audio, mpris::start().ok(), None)?;
+        if let Some(e) = audio_err {
+            app.error(e);
+        }
+        Ok(app)
+    }
 
+    /// The same library with no sound server, no session bus and playlists in
+    /// `playlists`, for a test that must touch nothing of the machine it runs on.
+    pub fn offline(root: PathBuf, sort_key: SortKey, playlists: PathBuf) -> Result<App> {
+        App::build(root, sort_key, library::QUIET, None, None, Some(playlists))
+    }
+
+    fn build(
+        root: PathBuf,
+        sort_key: SortKey,
+        on: library::Report,
+        audio: Option<Audio>,
+        mpris: Option<Mpris>,
+        playlists_dir: Option<PathBuf>,
+    ) -> Result<App> {
         let mut app = App {
             root,
             tracks: Vec::new(),
@@ -388,7 +485,6 @@ impl App {
             line: String::new(),
             line_prefix: ':',
             line_cur: 0,
-            line_insert: true,
             count: None,
             pending: None,
             name_reg: String::new(),
@@ -396,9 +492,10 @@ impl App {
             search_back: false,
             visual_anchor: None,
             yank: Vec::new(),
-            playlist_dirty: false,
+            pl_edits: std::collections::BTreeMap::new(),
             doomed: Vec::new(),
             doomed_files: Vec::new(),
+            replaced: Vec::new(),
             cut: Vec::new(),
             moves: Vec::new(),
             copies: Vec::new(),
@@ -407,16 +504,20 @@ impl App {
             redo_stack: Vec::new(),
             edit: None,
             renames: std::collections::BTreeMap::new(),
-            playlists_dir: None,
+            playlists_dir,
+            elsewhere: Vec::new(),
             queue: Vec::new(),
             qpos: 0,
+            qpos_next: false,
             history: Vec::new(),
             shuffle_bag: Vec::new(),
             playing: None,
+            playing_gone: None,
+            playing_file: None,
             repeat: Repeat::Off,
             shuffle: false,
             audio,
-            mpris: mpris::start().ok(),
+            mpris,
             msg: None,
             msg_at: None,
             cursor_screen: None,
@@ -424,11 +525,16 @@ impl App {
             show_history: false,
             history_top: 0,
             show_info: false,
+            info_top: 0,
             changes_pan: 0,
             changes_top: 0,
             show_changes: false,
             show_help: false,
             help_scroll: 0,
+            alert: None,
+            job: None,
+            seeks: 0,
+            width: 80,
             quit: false,
             rng: seed(),
         };
@@ -436,9 +542,6 @@ impl App {
         app.reload_playlists();
         app.reload_reporting(on)?;
         app.tabs.push(app.snapshot());
-        if let Some(e) = audio_err {
-            app.error(e);
-        }
         Ok(app)
     }
 
@@ -456,6 +559,30 @@ impl App {
         self.msg_at = Some(std::time::Instant::now());
     }
 
+    /// Reports a failure: on the message row when it fits on one line there,
+    /// otherwise in a yellow box that stays until it is dismissed, because a
+    /// message cut off at the edge of the screen loses the part that says why.
+    pub fn fail(&mut self, title: &str, text: impl Into<String>) {
+        use unicode_width::UnicodeWidthStr;
+        let text = text.into();
+        if !text.contains('\n') && text.width() < self.width {
+            self.error(text);
+            return;
+        }
+        self.alert = Some(Alert {
+            title: title.to_string(),
+            lines: text.lines().map(str::to_string).collect(),
+            top: 0,
+        });
+    }
+
+    /// True while the alert is the box on screen. A failure that lands while
+    /// another window is up waits for it to close rather than covering it.
+    pub fn alert_up(&self) -> bool {
+        self.alert.is_some()
+            && !(self.show_info || self.show_changes || self.show_help || self.show_history)
+    }
+
     /// The message while it is still fresh, and its kind. `None` once it has
     /// expired, so an old line never reads as the current state.
     pub fn live_msg(&self) -> Option<(&str, bool)> {
@@ -467,6 +594,13 @@ impl App {
 
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
+}
+
+/// What the sidebar calls a playlist file: its name without the extension.
+fn playlist_label(path: &std::path::Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn seed() -> u64 {
@@ -481,6 +615,7 @@ fn seed() -> u64 {
 // things, and so each area only reaches what it needs.
 mod cursor;
 mod files;
+pub mod jobs;
 pub mod plan;
 mod playback;
 mod playlists;
@@ -490,6 +625,7 @@ mod search;
 mod select;
 mod tabs;
 mod undo;
+mod write;
 
 #[cfg(test)]
 mod tests;

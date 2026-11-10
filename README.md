@@ -1,7 +1,5 @@
 # vibox
 
-> **Canonical:** [gitlab.com/safteinzz/vibox](https://gitlab.com/safteinzz/vibox) · **Mirror:** [github.com/safteinzz/vibox](https://github.com/safteinzz/vibox)
-
 <!-- desc:start -->
 a jukebox you exit with :q - a cli music player whose library is a vim buffer, nothing written until :w
 <!-- desc:end -->
@@ -16,7 +14,7 @@ vibox self update  # install the latest
 
 No cargo yet? Rust installs the same way on every distro: [rustup.rs](https://rustup.rs).
 
-![A tour of vibox: playing a track with vi motions, searching, renaming four badly named files in place, reading the pending diff with :changes, writing it with :w, the lyrics pane following the song, and a playlist opening in its own tab](https://gitlab.com/safteinzz/vibox/-/raw/main/readme-assets/demo.gif)
+![A tour of vibox: playing a track with vi motions, searching, renaming four badly named files in place, reading what the write will change before writing it, the lyrics pane following the song, and a playlist opening in its own tab](https://raw.githubusercontent.com/safteinzz/vibox/main/readme-assets/demo.gif)
 
 ## Open a library
 
@@ -35,23 +33,25 @@ never modified.
 
 ## Nothing is written until `:w`
 
-Renames, moves, copies and playlist edits sit in memory until you write them,
-and `:changes` shows what `:w` would do. The batch is checked against the disk
-first, so a clash stops the whole write and nothing is ever half applied.
+Renames, moves, copies, deletions and playlist edits sit in memory until you
+write them, and `:changes` shows what `:w` would do. The batch is checked
+against the disk first, so a clash stops the whole write before anything is
+written.
 
 ## Changing the library itself
 
 It is vim, and the folder is the buffer: `dd` a track, `t` its new folder into
-a tab, `gt` over and `p`, or `yy` to copy it instead. The move is an edit like
-any other, so `u` takes it back and only `:w` writes it.
+a tab, `gt` over and `p`, or `yy` to copy it instead. A `dd` with no `p` after
+it deletes the file, and `dd` on a folder deletes the folder. Each is an edit
+like any other: `u` takes it back and only `:w` writes it.
 
-## Playlists
+## Fill a playlist by yanking and putting
 
 Filling a playlist is a yank and a put: `t` a folder into its own tab, `V` and
 `j` to select, `y`, `gt` to the playlist, `p`. `dd` and `p` reorder it the same
 way.
 
-## Lyrics
+## Read the words as the song plays
 
 `:set lyrics` fetches from lrclib and follows the song. When a sheet sits a few
 seconds out, `[` and `]` shift it and the correction is kept. The pane takes the
@@ -61,17 +61,18 @@ on disk.
 ## Commands
 
 ```
-:e <path>       open a directory or an m3u for this session
+:e <path>           open a directory or an m3u for this session
 :set root=~/Music   the library vibox opens on its own
-:set lyrics     lyrics pane; :set noartist hides a column, :set artist! flips it
-:sort artist    path, title, artist, album, duration
-:vol 70         :seek 1:30, :reload, :42 jumps to row 42
-:changes        what :w would do        :w writes it, :e! discards it
-:history        every track played this session, in order, j and k scroll
-:clearcache     drop every cached lyric so they are fetched again
-:mkrc           save your options to ~/.config/vibox/viboxrc
-:matrix         wake up
-:q  :q!         close the tab, or leave without writing
+:set lyrics         lyrics pane; :set noartist hides a column, :set artist! flips it
+:sort artist        path, title, artist, album, duration
+:vol 70             :seek 1:30, :reload, :42 jumps to row 42
+:changes            what :w would do; :w writes it, :e! discards it
+:mkdir jazz         a new folder, made the moment you type it
+:history            every track played this session, in order, j and k scroll
+:clearcache         drop every cached lyric so they are fetched again
+:mkrc               save your options to the rc file
+:matrix             wake up
+:q  :q!             close the tab, or leave without writing
 ```
 
 `:set` works the way vim's does and lists everything on its own, and `:help`
@@ -90,8 +91,9 @@ anywhere.
 ~/.local/share/vibox/lyrics/         the lyric cache, dropped by :clearcache
 ```
 
-Nothing else is written until you type `:w`, so a crash or a kill loses only
-what was pending.
+Nothing else is written until you type `:w`, apart from a folder `:mkdir`
+makes and the empty playlist `:mkplaylist` makes, so a crash or a kill loses
+only what was pending.
 
 ## Compatibility
 

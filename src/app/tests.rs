@@ -17,7 +17,9 @@ fn set_name(app: &mut App, name: &str) {
 /// Everything a test can write lives under the returned directory, which is
 /// deleted when it drops. Playlists included: a test that wrote into the
 /// user's own playlist folder would leave rubbish on a contributor's
-/// machine, and could overwrite a playlist they actually listen to.
+/// machine, and could overwrite a playlist they actually listen to. Offline,
+/// so no test reaches the sound server or claims the media keys on the
+/// session bus of the machine it runs on.
 fn library(files: &[&str]) -> (App, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     for name in files {
@@ -26,9 +28,12 @@ fn library(files: &[&str]) -> (App, tempfile::TempDir) {
         std::fs::write(path, b"").unwrap();
     }
 
-    let mut app = App::new(dir.path().to_path_buf(), SortKey::Path, library::QUIET).unwrap();
-    app.playlists_dir = Some(dir.path().join(".playlists"));
-    app.reload_playlists();
+    let app = App::offline(
+        dir.path().to_path_buf(),
+        SortKey::Path,
+        dir.path().join(".playlists"),
+    )
+    .unwrap();
     (app, dir)
 }
 
@@ -40,14 +45,17 @@ fn set_turns_options_on_off_and_over() {
     let (mut app, _dir) = library(&["a.mp3"]);
 
     crate::excmd::run(&mut app, "set nokaraoke");
-    assert!(!app.karaoke);
+    assert!(!app.karaoke, "`no` turns an option off");
     crate::excmd::run(&mut app, "set karaoke");
-    assert!(app.karaoke);
+    assert!(app.karaoke, "the bare name turns it on");
     crate::excmd::run(&mut app, "set karaoke!");
-    assert!(!app.karaoke);
+    assert!(!app.karaoke, "`!` flips it");
 
     crate::excmd::run(&mut app, "set noartist");
-    assert!(!app.columns.get("artist").unwrap());
+    assert!(
+        !app.columns.get("artist").unwrap(),
+        "a column is an option like any other"
+    );
 
     crate::excmd::run(&mut app, "set nonsense");
     assert!(
@@ -66,7 +74,7 @@ fn moving_the_folder_cursor_leaves_the_track_list_alone() {
 
     app.open_folder();
     assert_eq!(app.view.len(), 1, "enter is what opens a folder");
-    assert_eq!(app.focus, Pane::Tracks);
+    assert_eq!(app.focus, Pane::Tracks, "and the track list takes the keys");
 }
 
 #[test]
@@ -98,7 +106,10 @@ fn two_files_moved_onto_the_same_name_are_refused() {
         (root.join("one/x.mp3"), root.join("all/x.mp3")),
         (root.join("two/x.mp3"), root.join("all/x.mp3")),
     ];
-    assert!(app.write_plan().is_err());
+    assert!(
+        app.write_plan().is_err(),
+        "the second move would overwrite the first"
+    );
 }
 
 #[test]
@@ -113,10 +124,10 @@ fn a_clean_batch_of_moves_is_written() {
     ];
     app.write_all();
 
-    assert!(root.join("jazz/a.mp3").exists());
-    assert!(root.join("jazz/b.mp3").exists());
-    assert!(!root.join("a.mp3").exists());
-    assert!(app.moves.is_empty());
+    assert!(root.join("jazz/a.mp3").exists(), "a.mp3 should have moved");
+    assert!(root.join("jazz/b.mp3").exists(), "b.mp3 should have moved");
+    assert!(!root.join("a.mp3").exists(), "a move leaves no copy behind");
+    assert!(app.moves.is_empty(), "nothing written is still pending");
 }
 
 #[test]
@@ -148,15 +159,15 @@ fn deleting_a_track_repoints_everything_that_held_an_index() {
 #[test]
 fn changes_show_playlists_edited_in_another_tab() {
     let (mut app, _dir) = library(&["a.mp3"]);
+    let roadtrip = PathBuf::from("roadtrip.m3u");
     app.tabs.push(ViewTab {
-        playlist: Some("roadtrip".into()),
+        playlist: Some(roadtrip.clone()),
         folder: 0,
         cur: 0,
         top: 0,
         sort_key: SortKey::Path,
-        rows: vec![0],
-        dirty: true,
     });
+    app.pl_edits.insert(roadtrip, vec![0]);
 
     assert!(app.unsaved(), "a change anywhere counts as unsaved");
     assert!(
@@ -212,7 +223,7 @@ fn a_view_is_only_ever_open_in_one_tab() {
     app.tab = Tab::Playlists;
     app.open_in_new_tab();
     assert_eq!(app.tabs.len(), tabs, "no second tab of the same playlist");
-    assert_eq!(app.playlist_view.as_deref(), Some("mix"));
+    assert_eq!(app.playlist_name().as_deref(), Some("mix"));
 }
 
 #[test]
@@ -305,7 +316,7 @@ fn renaming_a_playlist_keeps_the_tab_showing_it() {
     set_name(&mut app, "roadtrip");
     app.write_all();
 
-    assert_eq!(app.playlist_view.as_deref(), Some("roadtrip"));
+    assert_eq!(app.playlist_name().as_deref(), Some("roadtrip"));
     assert!(app.playlists.iter().any(|(name, _)| name == "roadtrip"));
     assert!(!app.playlists.iter().any(|(name, _)| name == "mix"));
 }
@@ -456,7 +467,7 @@ fn e_bang_throws_away_every_kind_of_pending_change() {
     );
     assert!(app.renames.is_empty());
     assert!(app.doomed_files.is_empty());
-    assert!(!app.playlist_dirty);
+    assert!(app.pl_edits.is_empty());
 
     // and the disk was never touched by any of it
     assert!(dir.path().join("a.mp3").exists());
@@ -518,7 +529,7 @@ fn an_m3u_opened_as_the_root_makes_its_tracks_the_library() {
     let m3u = dir.path().join("list.m3u");
     std::fs::write(&m3u, format!("#EXTM3U\n{}\n", far.display())).unwrap();
 
-    let app = App::new(m3u, SortKey::Path, library::QUIET).unwrap();
+    let app = App::offline(m3u, SortKey::Path, dir.path().join(".playlists")).unwrap();
 
     assert_eq!(app.view.len(), 1, "the m3u's track is shown");
     assert_eq!(
@@ -652,8 +663,8 @@ fn pasted_files_stay_where_they_were_dropped() {
         .collect();
     assert_eq!(
         names,
-        vec!["aaa".to_string(), "keep".to_string()],
-        "the pasted row is at the cursor, not sorted away to the end"
+        vec!["keep".to_string(), "aaa".to_string()],
+        "the pasted row is under the cursor, where `p` puts, not sorted away to the end"
     );
 
     // and a sort is what puts it back in order
@@ -994,4 +1005,163 @@ fn zz_keeps_vibox_open_while_a_change_is_pending() {
         "ZZ quit with a deletion still waiting for :w, which drops it"
     );
     assert!(app.unsaved(), "the pending deletion must still be there");
+}
+
+/// The row in view showing `rel`, a path under the library root.
+fn row(app: &App, rel: &str) -> usize {
+    app.view
+        .iter()
+        .position(|&i| app.tracks[i].path.ends_with(rel))
+        .unwrap_or_else(|| panic!("no row shows {rel}"))
+}
+
+/// Where the folder ending in `name` sits in the sidebar, `everything` being 0.
+fn folder_row(app: &App, name: &str) -> usize {
+    app.folders
+        .iter()
+        .position(|(_, path)| path.ends_with(name))
+        .map(|i| i + 1)
+        .unwrap_or_else(|| panic!("no folder {name}"))
+}
+
+/// Opens a folder, as `enter` on it in the sidebar does.
+fn open(app: &mut App, name: &str) {
+    app.tab = Tab::Folders;
+    app.folder_cur = folder_row(app, name);
+    app.open_folder();
+}
+
+/// `p` with the sidebar on a folder, as the key does it: a cut moves, a yank
+/// copies. False when there was nothing to put.
+fn put_into(app: &mut App, name: &str) -> bool {
+    app.tab = Tab::Folders;
+    app.focus = Pane::Folders;
+    app.folder_cur = folder_row(app, name);
+    let put = app.move_cut_here() || app.copy_yank_here();
+    app.focus = Pane::Tracks;
+    put
+}
+
+/// Two rows cut together, one landing on the name the other leaves by its
+/// rename: both files have to come out the other side of `:w`.
+#[test]
+fn a_put_of_several_cut_rows_keeps_every_file() {
+    let (mut app, dir) = library(&["x/n.mp3", "y/n.mp3"]);
+    let root = dir.path();
+    std::fs::write(root.join("x/n.mp3"), "from x").unwrap();
+    std::fs::write(root.join("y/n.mp3"), "from y").unwrap();
+
+    app.cur = row(&app, "y/n.mp3");
+    app.begin_edit();
+    set_name(&mut app, "m");
+    app.commit_name();
+
+    app.mode = Mode::Visual;
+    app.visual_anchor = Some(0);
+    app.cur = 1;
+    app.cut_tracks();
+    assert!(put_into(&mut app, "y"), "both cut rows are put into `y`");
+    app.write_all();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("y/m.mp3"))
+            .ok()
+            .as_deref(),
+        Some("from y"),
+        "the renamed file keeps its new name"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("y/n.mp3"))
+            .ok()
+            .as_deref(),
+        Some("from x"),
+        "the moved file lands on the name the rename freed, and is not deleted"
+    );
+}
+
+/// A copy of a file put back onto that file's own name, after its row was
+/// marked for deletion: the put takes the deletion back, so the file stays.
+#[test]
+fn a_copy_put_back_onto_a_replaced_name_keeps_the_file() {
+    let (mut app, dir) = library(&["alpha/ant.mp3", "bravo/elk.mp3"]);
+    let root = dir.path();
+    std::fs::write(root.join("alpha/ant.mp3"), "ant").unwrap();
+
+    open(&mut app, "alpha");
+    app.cur = row(&app, "alpha/ant.mp3");
+    app.yank_selection();
+    assert!(
+        put_into(&mut app, "bravo"),
+        "the yank is copied into `bravo`"
+    );
+
+    open(&mut app, "alpha");
+    app.cur = row(&app, "alpha/ant.mp3");
+    app.cut_tracks();
+
+    open(&mut app, "bravo");
+    app.cur = row(&app, "bravo/ant.mp3");
+    app.yank_selection();
+    assert!(put_into(&mut app, "alpha"), "the copy row is copied back");
+    app.write_all();
+
+    assert_eq!(
+        std::fs::read_to_string(root.join("alpha/ant.mp3"))
+            .ok()
+            .as_deref(),
+        Some("ant"),
+        "the copy back replaced the marked row, so the file is not deleted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("bravo/ant.mp3"))
+            .ok()
+            .as_deref(),
+        Some("ant"),
+        "the first copy is made"
+    );
+}
+
+/// A playlist edited and saved in the same `:w` as a move of one of its
+/// files names that file where the move leaves it.
+#[test]
+fn a_playlist_saved_with_a_move_names_where_the_file_lands() {
+    let (mut app, dir) = library(&[
+        "zone/emu.mp3",
+        "green/cat.mp3",
+        "gold/dog.mp3",
+        "blue/elk.mp3",
+    ]);
+    let root = dir.path().to_path_buf();
+    let m3u = app.playlists_dir.clone().unwrap().join("ed.m3u");
+    std::fs::create_dir_all(m3u.parent().unwrap()).unwrap();
+    let entries = ["zone/emu.mp3", "green/cat.mp3", "gold/dog.mp3"]
+        .map(|rel| root.join(rel).display().to_string())
+        .join("\n");
+    std::fs::write(&m3u, format!("#EXTM3U\n{entries}\n")).unwrap();
+    app.reload_playlists();
+
+    open(&mut app, "green");
+    app.cur = row(&app, "green/cat.mp3");
+    app.cut_tracks();
+    assert!(put_into(&mut app, "blue"), "cat is moved into `blue`");
+
+    app.tab = Tab::Playlists;
+    app.pl_cur = 0;
+    app.open_playlist();
+    app.cur = 0;
+    app.remove_from_playlist();
+    app.write_all();
+
+    let saved = std::fs::read_to_string(&m3u).unwrap();
+    let moved = root.join("blue/cat.mp3").display().to_string();
+    let stale = root.join("green/cat.mp3").display().to_string();
+    assert!(
+        saved.lines().any(|line| line == moved),
+        "the playlist names cat where it now is:\n{saved}"
+    );
+    assert!(
+        !saved.lines().any(|line| line == stale),
+        "the playlist names a path the move emptied:\n{saved}"
+    );
+    assert!(root.join("blue/cat.mp3").exists(), "the move itself ran");
 }

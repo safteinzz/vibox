@@ -1,5 +1,6 @@
-//! Windows drawn over the panes: `:info`, `:changes`, the play history and the
-//! help screen. An open window owns the keyboard, which `keys` enforces.
+//! Windows drawn over the panes: `K`, `:changes`, the play history, the help
+//! screen and a failure too long for the message row. An open window owns the
+//! keyboard, which `keys` enforces.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -13,10 +14,41 @@ use crate::library::fmt_duration;
 
 use super::name_diff::{change_style, marked, split_change};
 use super::name_diff::{chars_of, common};
-use super::widgets::{Window, dim, hscrollbar, vscrollbar, window, window_body_width};
+use super::widgets::{
+    Window, alert, dim, hscrollbar, vscrollbar, wide_window, window, window_body_width, wrap_words,
+};
 
-/// Width of the verb column in `:changes`: `renamed`, `deleted`, `save`.
+/// Width of the verb column in `:changes`: `rename`, `DELETE`, `move`, `save`.
 pub(super) const VERB: usize = 8;
+
+/// The narrowest each side of `:changes` is laid out, which the box has to be
+/// wide enough for or the verb column is what gets squeezed.
+const SIDE: usize = 10;
+
+/// A failure that has to be read, in yellow, until it is dismissed.
+pub(super) fn draw_alert(frame: &mut Frame, app: &mut App, area: Rect) {
+    let Some(shown) = app.alert.as_mut() else {
+        return;
+    };
+    let widest = shown.lines.iter().map(|l| l.width()).max().unwrap_or(0);
+    let room = window_body_width(area, widest).max(1);
+    let rows: Vec<String> = shown
+        .lines
+        .iter()
+        .flat_map(|line| wrap_words(line, room))
+        .collect();
+    let Window { frame: popup, body } = alert(frame, area, &shown.title, widest, rows.len());
+    let height = body.height as usize;
+    shown.top = shown.top.min(rows.len().saturating_sub(height));
+    let lines: Vec<Line> = rows
+        .iter()
+        .skip(shown.top)
+        .take(height)
+        .map(|row| Line::raw(row.clone()))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), body);
+    vscrollbar(frame, popup, rows.len(), shown.top, height);
+}
 
 /// `:history`: what this session has played, oldest first.
 ///
@@ -33,7 +65,8 @@ pub(super) fn draw_history(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let widest = numbered.iter().map(|l| l.width()).max().unwrap_or(0);
 
-    let Window { frame: popup, body } = window(frame, area, "history", "q close", widest, total);
+    let Window { frame: popup, body } =
+        wide_window(frame, area, "history", "q close", widest, total);
     let rows = body.height as usize;
     app.history_top = app.history_top.min(total.saturating_sub(rows));
     let top = app.history_top;
@@ -61,7 +94,7 @@ pub(super) fn draw_history(frame: &mut Frame, app: &mut App, area: Rect) {
 const LABEL: usize = 13;
 
 /// `K`: everything vibox knows about the track under the cursor.
-pub(super) fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
+pub(super) fn draw_info(frame: &mut Frame, app: &mut App, area: Rect) {
     let Some(track) = app.current_track() else {
         return;
     };
@@ -103,16 +136,21 @@ pub(super) fn draw_info(frame: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let body = window(
+    let total = lines.len();
+    let Window { frame: popup, body } = window(
         frame,
         area,
         "track info",
         "y yank · q close",
         LABEL + widest,
-        lines.len(),
-    )
-    .body;
-    frame.render_widget(Paragraph::new(lines), body);
+        total,
+    );
+    // Clamped here, where the height is known, like every window that scrolls.
+    let height = body.height as usize;
+    app.info_top = app.info_top.min(total.saturating_sub(height));
+    let top = app.info_top;
+    frame.render_widget(Paragraph::new(lines[top..].to_vec()), body);
+    vscrollbar(frame, popup, total, top, height);
 }
 
 /// Cuts `text` into pieces of at most `width` terminal cells each.
@@ -135,9 +173,10 @@ fn wrap_cells(text: &str, width: usize) -> Vec<String> {
 
 /// `:changes`: exactly what a `:w` would do, before you press it.
 ///
-/// Two long paths and an arrow are wider than any box, so the window pans
-/// sideways with `h` and `l`, and its bottom border says so when there is more
-/// to see.
+/// The window grows to fit the paths up to the whole screen, and past that it
+/// pans sideways with `h` and `l`, with the scrollbar on its bottom border
+/// showing there is more to see. The right side is there only when a change
+/// has one, so a list of deletions is not half empty.
 pub(super) fn draw_changes(frame: &mut Frame, app: &mut App, area: Rect) {
     let changes = app.pending_changes();
 
@@ -152,14 +191,17 @@ pub(super) fn draw_changes(frame: &mut Frame, app: &mut App, area: Rect) {
         .max()
         .unwrap_or(0);
 
+    let two_sided = changes.iter().any(|line| split_change(line).2.is_some());
     let empty = "nothing to write";
-    // The verb gutter, both sides of the diff and the divider between them.
+    // The verb gutter, then one side, or both and the divider between them.
     let natural = if changes.is_empty() {
         empty.len()
+    } else if two_sided {
+        VERB + 1 + widest.max(SIDE) * 2 + 1
     } else {
-        VERB + 1 + widest * 2 + 1
+        VERB + 1 + widest.max(SIDE)
     };
-    let Window { frame: popup, body } = window(
+    let Window { frame: popup, body } = wide_window(
         frame,
         area,
         "changes",
@@ -173,13 +215,16 @@ pub(super) fn draw_changes(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    // A gutter for the verb, then the two sides of the diff with a divider
-    // between them, the way vimdiff splits a window.
+    let (bar, side) = if two_sided {
+        (Constraint::Length(1), Constraint::Min(SIDE as u16))
+    } else {
+        (Constraint::Length(0), Constraint::Length(0))
+    };
     let [gutter, before, divider, after] = Layout::horizontal([
         Constraint::Length(VERB as u16 + 1),
-        Constraint::Min(10),
-        Constraint::Length(1),
-        Constraint::Min(10),
+        Constraint::Min(SIDE as u16),
+        bar,
+        side,
     ])
     .areas(body);
 
@@ -279,7 +324,10 @@ pub(super) const HELP: &[HelpSection] = &[
         &[
             ("", "nothing reaches the disk until :w"),
             ("c", "rename the track, folder or playlist here"),
-            ("dd x", "cut: a playlist entry, a playlist, a file"),
+            (
+                "dd x",
+                "cut: a playlist entry, a playlist, a file, a folder",
+            ),
             ("yy", "yank tracks"),
             ("p", "put the yank in a playlist or a folder"),
             ("dd then p", "move: cut it, put it where it goes"),
@@ -359,6 +407,7 @@ pub(super) const HELP: &[HelpSection] = &[
         ":commands",
         &[
             (":w", "write it all; :w mix saves the view as a playlist"),
+            (":w! mix", "the same over a playlist that already exists"),
             (":ch", "list exactly what :w would do"),
             (":e!", "throw away what is waiting"),
             (":mkdir jazz", "a new folder under the library root"),
@@ -430,7 +479,7 @@ pub fn help_len() -> usize {
 pub(super) fn draw_help(frame: &mut Frame, app: &mut App, area: Rect) {
     let lines = help_lines();
     let widest = lines.iter().map(Line::width).max().unwrap_or(0);
-    let win = window(frame, area, "help", "q close", widest, lines.len());
+    let win = wide_window(frame, area, "help", "q close", widest, lines.len());
     let body = win.body;
 
     // Clamped here, where the height is known: scrolling past the end would

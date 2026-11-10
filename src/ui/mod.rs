@@ -1,5 +1,5 @@
-//! Rendering. Two panes, a progress line, a statusline and the command line,
-//! in that order, exactly like a neovim window with a lualine under it.
+//! Rendering. The folder and track panes, the lyrics when they are on, then a
+//! progress line, a statusline and the command line, in that order.
 //!
 //! No images, no glyphs outside plain box drawing and the arrows that spell keys:
 //! whatever font the terminal is already using is the font vibox uses.
@@ -22,7 +22,7 @@ pub use popups::help_len;
 use folders::FOLDER_W;
 use folders::draw_folders;
 use lyrics::{draw_lyrics, draw_lyrics_popup};
-use popups::{draw_changes, draw_help, draw_history, draw_info};
+use popups::{draw_alert, draw_changes, draw_help, draw_history, draw_info};
 use status::{draw_cmdline, draw_progress, draw_status};
 use tracks::draw_tracks;
 
@@ -38,6 +38,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Claimed by whichever pane is inserting, so the terminal draws its own
     // thin bar there instead of a painted block.
     app.cursor_screen = None;
+    app.width = usize::from(cmdline.width);
 
     let folder_w = FOLDER_W.min(main.width / 2);
     // Lyrics only take a pane when the track list can still breathe; on a
@@ -100,5 +101,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.show_help {
         draw_help(frame, app, over);
+    }
+    // Last, over anything else that is up: it has to be read before anything
+    // under it means anything.
+    if app.alert_up() {
+        draw_alert(frame, app, over);
     }
 }

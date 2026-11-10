@@ -17,5 +17,6 @@ pub mod matrix;
 pub mod mpris;
 pub mod name;
 pub mod player;
+pub mod reason;
 pub mod selfcmd;
 pub mod ui;

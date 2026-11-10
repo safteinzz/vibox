@@ -10,15 +10,12 @@ impl App {
             cur: self.cur,
             top: self.top,
             sort_key: self.sort_key,
-            rows: self.playlist_rows.clone(),
-            dirty: self.playlist_dirty,
         }
     }
 
     fn restore(&mut self, tab: &ViewTab) {
         self.playlist_view = tab.playlist.clone();
-        self.playlist_rows = tab.rows.clone();
-        self.playlist_dirty = tab.dirty;
+        self.refresh_playlist_rows();
         self.folder_open = tab.folder;
         self.folder_cur = tab.folder;
         if self.sort_key != tab.sort_key {
@@ -42,21 +39,25 @@ impl App {
                     tab
                 };
                 let name = match (&tab.playlist, tab.folder) {
-                    (Some(name), _) => name.clone(),
+                    (Some(path), _) => playlist_label(path),
                     (None, 0) => "everything".to_string(),
                     (None, folder) => self
                         .folders
                         .get(folder - 1)
                         .map_or_else(|| "everything".to_string(), |(label, _)| label.clone()),
                 };
-                (name, tab.dirty)
+                let dirty = tab
+                    .playlist
+                    .as_ref()
+                    .is_some_and(|path| self.pl_edits.contains_key(path));
+                (name, dirty)
             })
             .collect()
     }
 
     pub fn cycle_tab(&mut self, delta: isize) {
         if self.tabs.len() < 2 {
-            self.info("only one tab: `t` on a folder or playlist opens another");
+            self.error("only one tab: `t` on a folder or playlist opens another");
             return;
         }
         self.tabs[self.tab_idx] = self.snapshot();
@@ -70,13 +71,17 @@ impl App {
     ///
     /// A view is only ever open once: two tabs of the same playlist would drift
     /// apart and the later `:w` would quietly win.
-    pub(super) fn jump_to_open(&mut self, playlist: Option<&str>, folder: usize) -> bool {
+    pub(super) fn jump_to_open(
+        &mut self,
+        playlist: Option<&std::path::Path>,
+        folder: usize,
+    ) -> bool {
         self.tabs[self.tab_idx] = self.snapshot();
         let found = self
             .tabs
             .iter()
             .position(|tab| match (playlist, &tab.playlist) {
-                (Some(name), Some(open)) => open == name,
+                (Some(path), Some(open)) => open == path,
                 (None, None) => tab.folder == folder,
                 _ => false,
             });
@@ -96,11 +101,11 @@ impl App {
     pub fn open_in_new_tab(&mut self) {
         let already = match self.tab {
             Tab::Playlists => {
-                let name = self
+                let path = self
                     .playlists
                     .get(self.pl_cur)
-                    .map(|(name, _)| name.clone());
-                name.is_some_and(|name| self.jump_to_open(Some(&name), 0))
+                    .map(|(_, path)| path.clone());
+                path.is_some_and(|path| self.jump_to_open(Some(&path), 0))
             }
             Tab::Folders => self.jump_to_open(None, self.folder_cur),
         };

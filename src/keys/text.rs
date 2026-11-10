@@ -1,33 +1,11 @@
-//! vi text helpers shared by the rename buffer and the `:`/`/` lines: char
-//! vectors, the character classes a word motion steps over, and where the word
-//! under an offset starts.
+//! Text helpers for the `:` and `/` lines: the line as characters, and where
+//! the word under an offset starts.
 
 use crate::app::App;
+use crate::name::{Class, class};
 
 pub(super) fn chars(app: &App) -> Vec<char> {
     app.line.chars().collect()
-}
-
-/// What kind of run a character belongs to, the way vim splits a line: a word
-/// of letters and digits, a run of punctuation, or whitespace between them.
-///
-/// This is why `w` on `ABBA - As` stops on the dash: punctuation is a word of
-/// its own, not a separator to skip over.
-#[derive(PartialEq, Eq, Clone, Copy)]
-pub(super) enum Class {
-    Space,
-    Word,
-    Punct,
-}
-
-pub(super) fn class(c: char) -> Class {
-    if c.is_whitespace() {
-        Class::Space
-    } else if c.is_alphanumeric() || c == '_' {
-        Class::Word
-    } else {
-        Class::Punct
-    }
 }
 
 /// Start of the word at or before `at`, which is where `b` and `ctrl-w` land.

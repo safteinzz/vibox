@@ -25,20 +25,24 @@ fn cells(n: usize) -> u16 {
 /// Two borders and two cells of padding either side of the body.
 const WINDOW_CHROME_W: usize = 6;
 
-fn window_width(area: Rect, body_w: usize) -> u16 {
+/// The widest a box whose body wraps may be, because a longer line is harder
+/// to read; a body that is cut or panned instead has no cap but `area`.
+const WRAPPED_MAX_W: u16 = 88;
+
+fn window_width(area: Rect, body_w: usize, max: u16) -> u16 {
     cells(body_w.saturating_add(WINDOW_CHROME_W))
-        .clamp(24, 88)
+        .clamp(24, max)
         .min(area.width)
 }
 
 /// How wide the body of a `window` asking for `body_w` comes out in `area`, for
 /// a body that has to be wrapped before its height is known.
 pub(super) fn window_body_width(area: Rect, body_w: usize) -> usize {
-    usize::from(window_width(area, body_w)).saturating_sub(WINDOW_CHROME_W)
+    usize::from(window_width(area, body_w, WRAPPED_MAX_W)).saturating_sub(WINDOW_CHROME_W)
 }
 
-/// Draws a read only window: cyan, `title` on the top border and nothing else
-/// there, `keys` dim on the last row after a blank one.
+/// Draws a read only window whose body wraps: cyan, `title` on the top border
+/// and nothing else there, `keys` dim on the last row after a blank one.
 ///
 /// `body_w` and `body_h` are the body in cells, chrome excluded. The box is 24
 /// to 88 wide and capped at `area`, never at a fraction of it, so a body taller
@@ -51,7 +55,57 @@ pub(super) fn window(
     body_w: usize,
     body_h: usize,
 ) -> Window {
-    let w = window_width(area, body_w);
+    let size = (body_w, body_h, WRAPPED_MAX_W);
+    framed(frame, area, title, keys, size, Color::Cyan)
+}
+
+/// `window` for a body that does not wrap (a list, a table, a diff): as wide
+/// as `body_w` up to the whole of `area`, since a cap would only cut it.
+pub(super) fn wide_window(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    keys: &str,
+    body_w: usize,
+    body_h: usize,
+) -> Window {
+    framed(
+        frame,
+        area,
+        title,
+        keys,
+        (body_w, body_h, u16::MAX),
+        Color::Cyan,
+    )
+}
+
+/// `window` in yellow: a failure that already happened and has to be read.
+pub(super) fn alert(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    body_w: usize,
+    body_h: usize,
+) -> Window {
+    framed(
+        frame,
+        area,
+        title,
+        "q close",
+        (body_w, body_h, WRAPPED_MAX_W),
+        Color::Yellow,
+    )
+}
+
+fn framed(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    keys: &str,
+    (body_w, body_h, max_w): (usize, usize, u16),
+    colour: Color,
+) -> Window {
+    let w = window_width(area, body_w, max_w);
     // The blank and the key row under the body, two borders and the top padding.
     let h = cells(body_h.saturating_add(5)).min(area.height);
     let popup = Rect {
@@ -63,7 +117,7 @@ pub(super) fn window(
 
     let block = Block::bordered()
         .title(format!(" {title} "))
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(colour))
         .padding(Padding::new(2, 2, 1, 0));
     let inner = block.inner(popup);
     frame.render_widget(Clear, popup);
@@ -123,6 +177,38 @@ pub(super) fn pane_vscrollbar(frame: &mut Frame, rows: Rect, total: usize, top: 
         ..rows
     };
     vscrollbar(frame, around, total, top, rows.height as usize);
+}
+
+/// `text` broken at spaces into rows of at most `width` cells, a word longer
+/// than a row cut where the row ends, so how many rows it takes is known
+/// before it is drawn.
+pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    let width = width.max(1);
+    let mut rows = vec![String::new()];
+    for word in text.split(' ') {
+        let row = rows.last_mut().expect("rows starts with one");
+        let gap = usize::from(!row.is_empty());
+        if row.width() + gap + word.width() <= width {
+            if gap == 1 {
+                row.push(' ');
+            }
+            row.push_str(word);
+            continue;
+        }
+        if !row.is_empty() {
+            rows.push(String::new());
+        }
+        for ch in word.chars() {
+            let row = rows.last_mut().expect("rows starts with one");
+            if row.width() + ch.width().unwrap_or(0) > width && !row.is_empty() {
+                rows.push(String::new());
+            }
+            rows.last_mut().expect("rows starts with one").push(ch);
+        }
+    }
+    rows
 }
 
 pub(super) fn dim() -> Style {

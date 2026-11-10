@@ -1,9 +1,9 @@
 //! The rows printed while the library is scanned, before the terminal is taken
 //! over: a braille wordmark decoding above a progress line.
 //!
-//! Everything here writes into a `Write` rather than straight to stderr, so
-//! `tests/boot.rs` can assert the escape codes and `examples/boot.rs` can play
-//! the whole thing back without a library to scan.
+//! Everything here writes into a `Write` rather than straight to stderr, so the
+//! tests at the bottom can assert the escape codes and `examples/boot.rs` can
+//! play the whole thing back without a library to scan.
 
 use std::io::Write;
 use std::sync::Mutex;
@@ -53,6 +53,26 @@ pub fn short(root: &std::path::Path, budget: usize) -> String {
     format!("…{tail}")
 }
 
+/// `line` cut to `cols` cells, with `…` where it was cut.
+fn fit(line: &str, cols: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if line.width() <= cols {
+        return line.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in line.chars() {
+        let w = ch.width().unwrap_or(0);
+        if used + w + 1 > cols {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 /// The progress line printed while the library is scanned, before the terminal
 /// is taken over.
 ///
@@ -78,6 +98,9 @@ pub struct Boot<W: Write + Send = std::io::Stderr> {
     /// Where the rows go. Locked with `last`, so two worker threads cannot
     /// interleave halves of a frame.
     out: Mutex<W>,
+    /// How wide the terminal is. A row that wraps is one the next frame climbs
+    /// over one row short, and every frame after that leaves a copy behind.
+    cols: usize,
 }
 
 impl Boot<std::io::Stderr> {
@@ -104,6 +127,7 @@ impl<W: Write + Send> Boot<W> {
             noise: AtomicU64::new(0x2545_F491_4F6C_DD1D),
             throttle: true,
             out: Mutex::new(out),
+            cols,
         }
     }
 
@@ -191,6 +215,10 @@ impl<W: Write + Send> Boot<W> {
             }
         };
 
+        // One cell short of the edge: a line that fills the last column leaves
+        // the cursor waiting to wrap, and some terminals wrap it.
+        let line = fit(&line, self.cols.saturating_sub(1));
+
         // Three rows: two of wordmark and the progress line under them. Back up
         // over the wordmark first, so every frame overwrites the last one in
         // place. The progress line stays last because `\r` has to be able to
@@ -218,5 +246,129 @@ impl<W: Write + Send> Boot<W> {
             write!(out, "\x1b[2A\r\x1b[J").ok();
             out.flush().ok();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The boot rows are three rows of escape codes rewritten in place, and the
+    //! cursor arithmetic is the part that breaks silently: one row out and the
+    //! progress line eats the wordmark, or the wipe leaves half of it behind.
+
+    use std::sync::{Arc, Mutex};
+
+    use super::Boot;
+    use crate::library::Scan;
+
+    /// A writer the test can read back.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Recorder {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    fn booted() -> (Boot<Recorder>, Recorder) {
+        let out = Recorder::default();
+        let mut boot = Boot::with_writer(std::path::Path::new("/music"), out.clone(), true);
+        boot.draw_every_frame();
+        (boot, out)
+    }
+
+    #[test]
+    fn the_first_frame_does_not_move_the_cursor_up_into_the_prompt() {
+        let (boot, out) = booted();
+        boot.report(Scan::Reading(0, 100));
+
+        let text = out.text();
+        assert!(
+            !text.starts_with("\x1b[2A"),
+            "there is nothing above the first frame to go back to"
+        );
+        assert_eq!(
+            text.matches('\n').count(),
+            2,
+            "two wordmark rows, then the progress line"
+        );
+    }
+
+    #[test]
+    fn every_later_frame_goes_back_over_the_wordmark_first() {
+        let (boot, out) = booted();
+        boot.report(Scan::Reading(0, 100));
+        let first = out.text().len();
+        boot.report(Scan::Reading(100, 100));
+
+        let later = &out.text()[first..];
+        assert!(
+            later.starts_with("\x1b[2A"),
+            "a redraw has to step back over the two wordmark rows, got `{}`",
+            later
+                .escape_debug()
+                .to_string()
+                .chars()
+                .take(40)
+                .collect::<String>()
+        );
+    }
+
+    #[test]
+    fn finishing_wipes_every_row_it_drew() {
+        let (boot, out) = booted();
+        boot.report(Scan::Reading(50, 100));
+        let before = out.text().len();
+        boot.finish();
+
+        assert_eq!(
+            &out.text()[before..],
+            "\x1b[2A\r\x1b[J",
+            "back to the top row, then clear to the bottom of the screen"
+        );
+    }
+
+    #[test]
+    fn nothing_is_drawn_at_all_when_there_is_no_terminal() {
+        let out = Recorder::default();
+        let mut boot = Boot::with_writer(std::path::Path::new("/music"), out.clone(), false);
+        boot.draw_every_frame();
+
+        boot.report(Scan::Reading(50, 100));
+        boot.finish();
+        assert!(
+            out.text().is_empty(),
+            "escape codes belong in a terminal, not in a redirected stderr"
+        );
+    }
+
+    /// The wordmark is the point: it has to end up spelling the thing.
+    #[test]
+    fn the_wordmark_resolves_as_the_scan_does() {
+        let (boot, _out) = booted();
+
+        let done = boot.wordmark(1.0);
+        for row in ["⢣⡜ ⡇⠀⣏⣹ ⡎⢱ ⢣⡜", "⠈⡇ ⡇ ⣇⣸ ⢇⡸ ⡜⢣"] {
+            for ch in row.chars() {
+                assert!(done.contains(ch), "a finished wordmark is missing `{ch}`");
+            }
+        }
+
+        // and at the start only the gaps are settled
+        let begun = boot.wordmark(0.0);
+        assert!(
+            !begun.contains('⣹'),
+            "nothing but the gaps has locked in yet"
+        );
     }
 }

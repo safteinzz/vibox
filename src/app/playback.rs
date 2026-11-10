@@ -1,6 +1,5 @@
 //! Starting playback, walking the queue and keeping mpris in step.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::mpris::{self, Remote};
@@ -17,27 +16,19 @@ impl App {
         }
         self.queue = self.view.clone();
         self.qpos = self.cur;
+        self.qpos_next = false;
         self.history.clear();
         self.shuffle_bag.clear();
         self.play_queue_pos();
-    }
-
-    /// Where a track actually is on disk right now.
-    ///
-    /// A pending move has already changed the path the list shows, but the file
-    /// itself does not move until `:w`, so playback follows it back.
-    fn disk_path(&self, path: &Path) -> PathBuf {
-        self.moves
-            .iter()
-            .find(|(_, to)| to == path)
-            .map_or_else(|| path.to_path_buf(), |(from, _)| from.clone())
     }
 
     fn play_queue_pos(&mut self) {
         let Some(&track_idx) = self.queue.get(self.qpos) else {
             return;
         };
-        let path = self.disk_path(&self.tracks[track_idx].path);
+        // The file as it is on disk now: a pending move has not moved it yet,
+        // and a pending copy plays the file it is made from.
+        let path = self.origin_of(&self.tracks[track_idx].path);
         let Some(audio) = self.audio.as_mut() else {
             self.error("no audio device: playback is disabled");
             return;
@@ -45,9 +36,14 @@ impl App {
         match audio.play(&path) {
             Ok(()) => {
                 self.playing = Some(track_idx);
+                self.playing_gone = None;
+                self.playing_file = Some(path);
+                self.qpos_next = false;
                 self.msg = None;
-                // New words: whatever was pinned was for the last song.
+                // New words: whatever was pinned, or scrolled to, was for the
+                // last song.
                 self.unpin_lyrics();
+                self.lyrics_top = 0;
                 // The one place a track actually starts, so the one place the
                 // session log grows.
                 let track = &self.tracks[track_idx];
@@ -59,7 +55,9 @@ impl App {
             }
             Err(e) => {
                 self.playing = None;
-                self.error(format!("{e}"));
+                self.playing_gone = None;
+                self.playing_file = None;
+                self.error(crate::reason::chain(&e));
             }
         }
     }
@@ -69,6 +67,8 @@ impl App {
             audio.stop();
         }
         self.playing = None;
+        self.playing_gone = None;
+        self.playing_file = None;
     }
 
     /// Moves through the queue. `auto` is a track ending on its own, which is
@@ -81,12 +81,17 @@ impl App {
             self.play_queue_pos();
             return;
         }
+        // Set when the entry that played has left the queue, so `qpos` was
+        // never heard.
+        let next_is_here = std::mem::take(&mut self.qpos_next);
         // Shuffle keeps a history, because "previous" has to mean the track you
         // just heard. Without it, going back walks the queue order instead, to
         // a track that was never played.
         if self.shuffle {
             if delta > 0 {
-                self.history.push(self.qpos);
+                if !next_is_here {
+                    self.history.push(self.qpos);
+                }
                 self.qpos = self.next_random();
             } else if let Some(previous) = self.history.pop() {
                 self.qpos = previous;
@@ -99,7 +104,11 @@ impl App {
             return;
         }
 
-        let next = self.qpos as isize + delta;
+        let next = if next_is_here && delta > 0 {
+            self.qpos as isize + delta - 1
+        } else {
+            self.qpos as isize + delta
+        };
         if next < 0 {
             self.qpos = 0;
         } else if next as usize >= self.queue.len() {
@@ -128,15 +137,23 @@ impl App {
     /// Called every event loop turn: detects a track that ran out, and picks
     /// up anything the audio thread wants to say.
     pub fn tick(&mut self) {
+        self.poll_job();
         if let Some(e) = self.audio.as_ref().and_then(Audio::take_error) {
             self.error(e);
+        }
+        // The server took the stream away: nothing is playing, and nothing
+        // should start playing on its own.
+        if self.audio.as_mut().is_some_and(Audio::take_killed) {
+            self.playing = None;
+            self.playing_gone = None;
+            self.playing_file = None;
         }
 
         let finished = self
             .audio
             .as_ref()
             .is_some_and(|a| a.has_track() && a.finished() && !a.is_paused());
-        if finished && self.playing.is_some() {
+        if finished && self.playing_track().is_some() {
             self.advance(1, true);
         }
 
@@ -184,12 +201,9 @@ impl App {
                 Remote::Stop => self.stop(),
                 Remote::Next => self.advance(1, false),
                 Remote::Prev => self.advance(-1, false),
-                Remote::Seek(offset_us) => {
-                    if let Some(audio) = self.audio.as_ref()
-                        && let Err(e) = audio.seek_by(offset_us / 1_000_000)
-                    {
-                        self.error(format!("{e}"));
-                    }
+                Remote::Seek(offset_us) => self.seek_by_ms(offset_us / 1000),
+                Remote::SetPosition(position_us) => {
+                    self.seek_to(Duration::from_micros(position_us.max(0) as u64));
                 }
                 Remote::Volume(v) => {
                     if let Some(audio) = self.audio.as_mut() {
@@ -223,11 +237,46 @@ impl App {
             volume: audio.map_or(0.0, |a| f64::from(a.volume()) / 100.0),
             can_next: !self.queue.is_empty(),
             can_prev: !self.queue.is_empty(),
+            seeks: self.seeks,
         });
     }
 
     pub fn elapsed(&self) -> Duration {
         self.audio.as_ref().map_or(Duration::ZERO, Audio::pos)
+    }
+
+    /// Seeks by `delta_ms` from where the track is now, for `h`, `l`,
+    /// `:seek +30` and a remote's relative seek alike.
+    pub fn seek_by_ms(&mut self, delta_ms: i64) {
+        let Some(audio) = self.audio.as_ref() else {
+            self.error("no audio device: playback is disabled");
+            return;
+        };
+        if !audio.has_track() {
+            self.error("nothing playing");
+            return;
+        }
+        match audio.seek_by_ms(delta_ms) {
+            Ok(()) => self.seeks += 1,
+            Err(e) => self.error(crate::reason::chain(&e)),
+        }
+    }
+
+    /// Seeks to a point in the track, for `:seek 1:30` and a remote's
+    /// `SetPosition`.
+    pub fn seek_to(&mut self, to: Duration) {
+        let Some(audio) = self.audio.as_ref() else {
+            self.error("no audio device: playback is disabled");
+            return;
+        };
+        if !audio.has_track() {
+            self.error("nothing playing");
+            return;
+        }
+        match audio.seek(to) {
+            Ok(()) => self.seeks += 1,
+            Err(e) => self.error(crate::reason::chain(&e)),
+        }
     }
 
     /// Draws from a bag of not-yet-played queue positions, so shuffle covers
@@ -251,11 +300,11 @@ impl App {
     }
 
     /// Copies text to the system clipboard with OSC 52, the escape sequence
-    /// terminals answer for it.
+    /// terminals answer for it, and says it copied `what`.
     ///
     /// No clipboard crate: those pull in x11 or wayland C libraries, and the
     /// terminal already knows how to do this. tmux needs `set-clipboard on`.
-    pub fn copy_to_clipboard(&mut self, text: &str) {
+    pub fn copy_to_clipboard(&mut self, text: &str, what: &str) {
         use std::io::Write;
 
         const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -282,7 +331,7 @@ impl App {
             .and_then(|()| out.flush())
             .is_ok()
         {
-            self.info(format!("copied {text}"));
+            self.info(format!("copied {what}"));
         } else {
             self.error("cannot reach the terminal clipboard");
         }

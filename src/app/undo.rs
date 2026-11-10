@@ -8,83 +8,164 @@ use super::*;
 
 impl App {
     fn pending(&self) -> Pending {
+        let held = |what: &Renaming| -> Option<Held> {
+            match what {
+                Renaming::Track(i) => Some(Held::Track(self.tracks.get(*i)?.path.clone())),
+                other => Some(Held::Other(other.clone())),
+            }
+        };
+        let paths = |rows: &[usize]| -> Vec<PathBuf> {
+            rows.iter()
+                .filter_map(|&i| self.tracks.get(i).map(|t| t.path.clone()))
+                .collect()
+        };
         Pending {
-            renames: self.renames.clone(),
-            playlist_rows: self.playlist_rows.clone(),
-            playlist_dirty: self.playlist_dirty,
+            renames: self
+                .renames
+                .iter()
+                .filter_map(|(what, name)| Some((held(what)?, name.clone())))
+                .collect(),
+            pl_edits: self
+                .pl_edits
+                .iter()
+                .map(|(path, rows)| (path.clone(), paths(rows)))
+                .collect(),
             doomed: self.doomed.clone(),
             doomed_files: self.doomed_files.clone(),
+            replaced: self.replaced.clone(),
             cut: self.cut.clone(),
             moves: self.moves.clone(),
             copies: self.copies.clone(),
+            copy_rows: self
+                .copies
+                .iter()
+                .filter_map(|(_, to)| self.row_at(to).map(|i| self.tracks[i].clone()))
+                .collect(),
             doomed_dirs: self.doomed_dirs.clone(),
-            sidebar_name: self.edit.as_ref().map(|edit| edit.buf.text()),
+            typing: self
+                .edit
+                .as_ref()
+                .and_then(|edit| Some((held(&edit.what)?, edit.buf.text()))),
         }
     }
 
+    /// Steps memory to the state `p` recorded. Paths and rows live on the
+    /// tracks, so the step is the difference between the two, taken in an
+    /// order where no row lands on a name another row still has: rows that
+    /// leave go first (the ones `p` has replaced, and copy rows `p` does not
+    /// have), then moves are undone or done again, then copy rows and replaced
+    /// rows come back. Every row is then where it was when `p` was taken, so
+    /// the paths in `p` name the rows they named then.
     fn apply_pending(&mut self, p: Pending) {
-        self.renames = p.renames;
-        self.playlist_rows = p.playlist_rows;
-        self.playlist_dirty = p.playlist_dirty;
         self.doomed = p.doomed;
         self.doomed_files = p.doomed_files;
         self.cut = p.cut;
-        // Paths live on the tracks, so stepping between snapshots means
-        // undoing the moves this one does not have and applying the ones it does.
-        for (from, to) in &self.moves {
-            if !p.moves.contains(&(from.clone(), to.clone()))
-                && let Some(track) = self.tracks.iter_mut().find(|t| t.path == *to)
-            {
-                track.path = from.clone();
-            }
-        }
-        for (from, to) in &p.moves {
-            if !self.moves.contains(&(from.clone(), to.clone()))
-                && let Some(track) = self.tracks.iter_mut().find(|t| t.path == *from)
-            {
-                track.path = to.clone();
-            }
-        }
-        // A pending copy already shows in the list, so stepping between
-        // snapshots adds and removes those rows too.
-        let dropped: Vec<PathBuf> = self
-            .copies
+        self.doomed_dirs = p.doomed_dirs;
+
+        let mut leaving: Vec<PathBuf> = p
+            .replaced
             .iter()
-            .filter(|pair| !p.copies.contains(pair))
-            .map(|(_, to)| to.clone())
+            .filter(|r| !self.replaced.contains(r))
+            .map(|r| r.track.path.clone())
             .collect();
-        let added: Vec<(PathBuf, PathBuf)> = p
-            .copies
-            .iter()
-            .filter(|pair| !self.copies.contains(pair))
-            .cloned()
-            .collect();
-        self.copies = p.copies;
-        if !dropped.is_empty() {
-            self.forget_tracks(&dropped);
-        }
-        for (from, to) in added {
-            if let Some(source) = self.tracks.iter().find(|t| t.path == from) {
-                let mut copy = source.clone();
-                copy.path = to;
-                copy.file = copy
-                    .path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.tracks.push(copy);
-            }
+        leaving.extend(
+            self.copies
+                .iter()
+                .filter(|pair| !p.copies.contains(pair))
+                .map(|(_, to)| to.clone()),
+        );
+        if !leaving.is_empty() {
+            self.forget_tracks(&leaving);
         }
 
+        // Every row is found before any of them moves: one step can free a
+        // name and fill it, and a row found by a name another row has just
+        // taken would be the wrong one.
+        let mut steps: Vec<(usize, PathBuf, PathBuf)> = Vec::new();
+        for (origin, now) in &self.moves {
+            let then = p
+                .moves
+                .iter()
+                .find(|(o, _)| o == origin)
+                .map_or(origin, |(_, t)| t);
+            if then != now
+                && let Some(i) = self.row_at(now)
+            {
+                steps.push((i, now.clone(), then.clone()));
+            }
+        }
+        for (origin, then) in &p.moves {
+            if !self.moves.iter().any(|(o, _)| o == origin)
+                && let Some(i) = self.row_at(origin)
+            {
+                steps.push((i, origin.clone(), then.clone()));
+            }
+        }
+        for yanked in &mut self.yank {
+            if let Some((_, _, to)) = steps.iter().find(|(_, from, _)| *from == yanked.path) {
+                yanked.path.clone_from(to);
+            }
+        }
+        for (i, _, to) in &steps {
+            self.relocate_row(*i, to);
+        }
         self.moves = p.moves;
-        self.doomed_dirs = p.doomed_dirs;
-        if let (Some(edit), Some(name)) = (self.edit.as_mut(), p.sidebar_name) {
+
+        // By the row missing, not by the pair: a put can replace a copy row
+        // with a copy of the same file onto the same name.
+        let added: Vec<Track> = p
+            .copies
+            .iter()
+            .filter(|(_, to)| self.row_at(to).is_none())
+            .filter_map(|(_, to)| p.copy_rows.iter().find(|t| t.path == *to).cloned())
+            .collect();
+        self.tracks.extend(added);
+        self.copies = p.copies;
+        // A replaced copy row came back above, as the copy it was.
+        let returning: Vec<Track> = self
+            .replaced
+            .iter()
+            .filter(|r| r.file.is_some() && !p.replaced.contains(r))
+            .map(|r| r.track.clone())
+            .collect();
+        self.tracks.extend(returning);
+        self.replaced = p.replaced;
+
+        let row = |app: &App, held: &Held| -> Option<Renaming> {
+            match held {
+                Held::Track(path) => app.row_at(path).map(Renaming::Track),
+                Held::Other(what) => Some(what.clone()),
+            }
+        };
+        self.renames = p
+            .renames
+            .iter()
+            .filter_map(|(held, name)| Some((row(self, held)?, name.clone())))
+            .collect();
+        self.pl_edits = p
+            .pl_edits
+            .iter()
+            .map(|(path, rows)| {
+                let rows = rows.iter().filter_map(|r| self.row_at(r)).collect();
+                (path.clone(), rows)
+            })
+            .collect();
+        // Only into the buffer the text was typed in: a snapshot taken on
+        // another row would otherwise rename this one to that row's name.
+        let typed = p
+            .typing
+            .and_then(|(held, name)| Some((row(self, &held)?, name)));
+        if let (Some(edit), Some((what, name))) = (self.edit.as_mut(), typed)
+            && edit.what == what
+        {
             let col = edit.buf.col().min(name.chars().count());
             edit.buf = NameBuffer::new(&name);
             for _ in 0..col {
                 edit.buf.right();
             }
         }
+        self.reattach_playing();
+        self.refresh_playlist_rows();
         self.rebuild_view();
     }
 
@@ -95,6 +176,9 @@ impl App {
     }
 
     pub fn undo(&mut self) {
+        if self.busy() {
+            return;
+        }
         let Some(previous) = self.undo_stack.pop() else {
             self.info("already at the oldest change");
             return;
@@ -105,6 +189,9 @@ impl App {
     }
 
     pub fn redo(&mut self) {
+        if self.busy() {
+            return;
+        }
         let Some(next) = self.redo_stack.pop() else {
             self.info("already at the newest change");
             return;

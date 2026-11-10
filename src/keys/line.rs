@@ -7,10 +7,16 @@ use super::text::{chars, word_start};
 use crate::app::{App, Mode};
 use crate::excmd;
 
-/// The `:` and `/` lines. Always insert, like vim's command line, but the
-/// cursor can be moved and the usual readline keys work.
+/// The `:` and `/` lines. Always insert, with the arrows, `Home` and `End`,
+/// Backspace (and `ctrl-h`, which is Backspace), Delete, `ctrl-w` and `ctrl-u`.
 pub(super) fn line_mode(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let key = if ctrl && key.code == KeyCode::Char('h') {
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+    } else {
+        key
+    };
     match key.code {
         KeyCode::Esc => leave_line(app),
         KeyCode::Char('c') if ctrl => leave_line(app),
@@ -60,6 +66,16 @@ pub(super) fn line_mode(app: &mut App, key: KeyEvent) {
                 Mode::Normal
             };
             if was_search {
+                // An empty pattern repeats the last one.
+                let line = if line.is_empty() {
+                    app.last_search.clone()
+                } else {
+                    line
+                };
+                if line.is_empty() {
+                    app.error("no previous search");
+                    return;
+                }
                 app.last_search = line.clone();
                 app.search_back = backward;
                 if !app.search(&line, backward) {
@@ -69,7 +85,8 @@ pub(super) fn line_mode(app: &mut App, key: KeyEvent) {
                 excmd::run(app, &line);
             }
         }
-        KeyCode::Char(c) => {
+        // A chord the line has no use for is not its letter.
+        KeyCode::Char(c) if !ctrl && !alt => {
             let mut text = chars(app);
             text.insert(app.line_cur.min(text.len()), c);
             app.line_cur += 1;

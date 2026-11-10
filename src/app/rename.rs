@@ -1,8 +1,7 @@
 //! Renaming files and folders in the edit buffer, applied together on `:w`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::library::{self};
 use crate::name::NameBuffer;
 
 use super::*;
@@ -10,6 +9,9 @@ use super::*;
 impl App {
     /// Opens the list for editing. Nothing touches the disk until `:w`.
     pub fn begin_edit(&mut self) {
+        if self.busy() {
+            return;
+        }
         if self.view.is_empty() {
             self.error("nothing here to rename");
             return;
@@ -42,23 +44,39 @@ impl App {
 
     /// `c` on a sidebar row: renames the folder or the playlist under it.
     pub fn begin_sidebar_edit(&mut self) {
+        if self.busy() {
+            return;
+        }
         let what = match self.tab {
             Tab::Folders => {
-                if self.folder_cur == 0 {
+                let folder = self.folder_cur.checked_sub(1);
+                let Some((_, path)) = folder.and_then(|i| self.folders.get(i)).cloned() else {
+                    self.error("that is the whole library, not a folder");
+                    return;
+                };
+                // The `.` row is the library's own folder.
+                if self.root_dir().starts_with(&path) {
                     self.error("that is the whole library, not a folder");
                     return;
                 }
-                let Some((_, path)) = self.folders.get(self.folder_cur - 1).cloned() else {
+                if self.is_doomed_dir(&path) {
+                    self.error("that folder is marked for deletion: `dd` on it takes the mark off");
                     return;
-                };
+                }
                 Renaming::Folder(path)
             }
             Tab::Playlists => {
-                let Some((name, _)) = self.playlists.get(self.pl_cur).cloned() else {
+                let Some((_, path)) = self.playlists.get(self.pl_cur).cloned() else {
                     self.error("no playlist here to rename");
                     return;
                 };
-                Renaming::Playlist(name)
+                if self.is_doomed(&path) {
+                    self.error(
+                        "that playlist is marked for deletion: `dd` on it takes the mark off",
+                    );
+                    return;
+                }
+                Renaming::Playlist(path)
             }
         };
         self.open_name(what);
@@ -77,6 +95,7 @@ impl App {
         self.edit = Some(NameEdit {
             buf: NameBuffer::new(&name),
             what,
+            depth: self.undo_stack.len(),
         });
         self.mode = Mode::Edit;
     }
@@ -93,7 +112,7 @@ impl App {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            Renaming::Playlist(name) => name.clone(),
+            Renaming::Playlist(path) => playlist_label(path),
         }
     }
 
@@ -154,30 +173,142 @@ impl App {
     ///
     /// Nothing is written here. A rename queues up with the moves, copies and
     /// deletions so one `:w` does the lot and `u` takes any of it back, which
-    /// is why leaving a name never demands a write of its own.
-    pub fn commit_name(&mut self) {
+    /// is why leaving a name never demands a write of its own. A row that is
+    /// already moving or being copied takes the name as part of where it goes,
+    /// so the one step `:w` runs for it lands it under that name. A name that
+    /// cannot be given is refused here, with the old one kept.
+    pub fn commit_name(&mut self) -> bool {
         let Some(edit) = self.edit.take() else {
-            return;
+            return true;
         };
+        let depth = edit.depth.min(self.undo_stack.len());
         let name = edit.buf.text().trim().to_string();
         let was = self.name_of(&edit.what);
 
         if name == was {
-            self.renames.remove(&edit.what);
-        } else if !name.is_empty() {
+            if self.renames.contains_key(&edit.what) {
+                self.one_undo_step(depth);
+                self.renames.remove(&edit.what);
+            } else {
+                self.undo_stack.truncate(depth);
+            }
+            return true;
+        }
+        // The name it already has waiting changes nothing, so it is no step.
+        if self.renames.get(&edit.what) == Some(&name) {
+            self.undo_stack.truncate(depth);
+            return true;
+        }
+        if let Some(why) = self.bad_name(&edit.what, &name, &was) {
+            self.error(why);
+            self.undo_stack.truncate(depth);
+            return false;
+        }
+        if let Renaming::Track(i) = edit.what
+            && let Some(from) = self.tracks.get(i).map(|t| t.path.clone())
+            && self.is_staged(&from)
+        {
+            let Some(to) = self.rename_target(&edit.what, &name) else {
+                self.undo_stack.truncate(depth);
+                return false;
+            };
+            let kept = (0..self.tracks.len()).any(|j| {
+                j != i
+                    && !self.is_doomed_file(&self.tracks[j].path)
+                    && self.shown_path(j).as_deref() == Some(to.as_path())
+            });
+            if kept {
+                self.error(format!(
+                    "`{}` is already there, `{was}` kept",
+                    self.plain_under_root(&to)
+                ));
+                self.undo_stack.truncate(depth);
+                return false;
+            }
+            if let Some(why) = self.holder_stuck(&to, std::slice::from_ref(&from), &[]) {
+                self.error(why);
+                self.undo_stack.truncate(depth);
+                return false;
+            }
+            self.one_undo_step(depth);
+            self.land_on(&to);
+            if let Some(i) = self.row_at(&from) {
+                self.relocate_row(i, &to);
+            }
+            self.pend_move(from, to);
+            return true;
+        }
+        self.one_undo_step(depth);
+        self.renames.insert(edit.what, name);
+        true
+    }
+
+    /// Leaves exactly one undo step for a rename about to be queued: the state
+    /// from before its first keystroke when the typing saved one, or now.
+    fn one_undo_step(&mut self, depth: usize) {
+        if self.undo_stack.len() > depth {
+            self.undo_stack.truncate(depth + 1);
+            self.redo_stack.clear();
+        } else {
             self.checkpoint();
-            self.renames.insert(edit.what, name);
+        }
+    }
+
+    /// Why `name` cannot be given to `what`, if it cannot.
+    fn bad_name(&self, what: &Renaming, name: &str, was: &str) -> Option<String> {
+        if name.is_empty() {
+            return Some(format!("a name cannot be empty, `{was}` kept"));
+        }
+        if name.contains('/') {
+            return Some(format!(
+                "a name cannot contain `/`, this renames but never moves: `{was}` kept"
+            ));
+        }
+        match what {
+            Renaming::Playlist(path) => self
+                .playlists
+                .iter()
+                .any(|(_, p)| p != path && self.playlist_named(p) == name)
+                .then(|| format!("a playlist called `{name}` already exists, `{was}` kept")),
+            // vibox does not list hidden files, so the row would vanish.
+            _ if name.starts_with('.') => Some(format!(
+                "a name starting with `.` is hidden and would drop out of the list: `{was}` kept"
+            )),
+            _ => None,
+        }
+    }
+
+    /// The name a playlist has once `:w` has run its renames.
+    pub(super) fn playlist_named(&self, path: &Path) -> String {
+        let what = Renaming::Playlist(path.to_path_buf());
+        match self.renames.get(&what) {
+            Some(name) if !self.dormant(&what) => name.clone(),
+            _ => playlist_label(path),
         }
     }
 
     /// True when a name has been changed but not written.
     pub fn edit_dirty(&self) -> bool {
-        if !self.renames.is_empty() {
+        if self.renames.keys().any(|what| !self.dormant(what)) {
             return true;
         }
         self.edit
             .as_ref()
             .is_some_and(|edit| edit.buf.text() != self.name_of(&edit.what))
+    }
+
+    /// A rename of something marked for deletion, which `:w` does not run: a
+    /// row's waits in case a `p` moves it, which takes the new name along, and
+    /// any of them comes back when the mark comes off.
+    pub(super) fn dormant(&self, what: &Renaming) -> bool {
+        match what {
+            Renaming::Track(i) => self
+                .tracks
+                .get(*i)
+                .is_some_and(|t| self.is_doomed_file(&t.path)),
+            Renaming::Folder(path) => self.is_doomed_dir(path),
+            Renaming::Playlist(path) => self.is_doomed(path),
+        }
     }
 
     pub fn end_edit(&mut self) {
@@ -190,207 +321,78 @@ impl App {
     /// `:e!`: throws away everything waiting for a `:w`.
     ///
     /// All of it, not just the name being typed: the point of the command is
-    /// that `[+]` goes out and `:changes` comes back empty.
+    /// that `[+]` goes out and `:changes` comes back empty. Memory goes back
+    /// to what the disk holds without reading it again: a pending move already
+    /// shows the file where it is going and a pending copy as a row of its own,
+    /// and both are taken back here.
     pub fn discard_changes(&mut self) {
+        if self.busy() {
+            return;
+        }
         let had = self.unsaved();
         self.end_edit();
         self.renames.clear();
+        // Copy rows go before any row goes back, since one can be going back
+        // to the name a copy sits on.
+        let copies: Vec<PathBuf> = std::mem::take(&mut self.copies)
+            .into_iter()
+            .map(|(_, to)| to)
+            .collect();
+        self.forget_tracks(&copies);
+        // Every moved row is found before any goes back, since one can be
+        // going back to a name another has just left.
+        let back: Vec<(usize, PathBuf, PathBuf)> = std::mem::take(&mut self.moves)
+            .into_iter()
+            .filter_map(|(from, to)| Some((self.row_at(&to)?, to, from)))
+            .collect();
+        for yanked in &mut self.yank {
+            if let Some((_, _, origin)) = back.iter().find(|(_, now, _)| *now == yanked.path) {
+                yanked.path.clone_from(origin);
+            }
+        }
+        for (i, _, origin) in &back {
+            self.relocate_row(*i, origin);
+        }
+        // Rows a put replaced come back where their files are, once nothing
+        // sits on those names, except a replaced copy row, which had no file.
+        for Replaced { mut track, file } in std::mem::take(&mut self.replaced) {
+            if let Some(file) = file {
+                track.path = file;
+                self.tracks.push(track);
+            }
+        }
+        self.reattach_playing();
         self.doomed.clear();
         self.doomed_files.clear();
         self.doomed_dirs.clear();
         self.cut.clear();
-        self.moves.clear();
-        self.copies.clear();
-        self.playlist_dirty = false;
-        for tab in &mut self.tabs {
-            tab.dirty = false;
-        }
         self.undo_stack.clear();
         self.redo_stack.clear();
 
-        // The list is showing cuts and moves that are no longer going to
-        // happen, so it has to be rebuilt from the library as it stands.
-        if let Err(e) = self.reload() {
-            self.error(format!("{e}"));
-            return;
-        }
+        // Every edited playlist goes back to what its file says.
+        self.pl_edits.clear();
+        self.refresh_playlist_rows();
+
+        // A put rearranged rows, which the sort puts back.
         self.reload_playlists();
+        self.resort();
+        self.rebuild_view();
 
         if had {
             self.info("changes thrown away");
         }
     }
 
-    /// Renames every changed file. Names are checked first, so a bad one stops
-    /// the whole write instead of leaving the batch half applied.
-    pub fn apply_edits(&mut self, steps: &[crate::app::plan::Step]) {
-        self.commit_name();
-        if self.renames.is_empty() {
-            return;
-        }
-
-        // `App::write_plan` has already checked the batch; what it adds here is
-        // the order. A rename whose target is another one's source has to wait
-        // for that one, or it lands on a name still in use.
-        let order: Vec<&PathBuf> = steps
-            .iter()
-            .filter_map(|step| match step {
-                crate::app::plan::Step::Rename(_, to) => Some(to),
-                _ => None,
-            })
-            .collect();
-
-        let mut queued: Vec<(Renaming, String)> = self
-            .renames
-            .iter()
-            .map(|(what, name)| (what.clone(), name.trim().to_string()))
-            .collect();
-        queued.sort_by_key(|(what, name)| {
-            self.rename_target(what, name)
-                .and_then(|to| order.iter().position(|planned| **planned == to))
-                .unwrap_or(usize::MAX)
-        });
-
-        let mut files = 0;
-        let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for (what, name) in queued {
-            match what {
-                Renaming::Track(idx) => {
-                    let old = self.tracks[idx].path.clone();
-                    let Some(new) = self.rename_target(&Renaming::Track(idx), &name) else {
-                        continue;
-                    };
-                    // `fs::rename` overwrites without asking, so the last word
-                    // is right here rather than only in the plan: between the
-                    // check and now, something else could have taken the name.
-                    if new.exists() && new != old {
-                        self.error(format!(
-                            "`{name}` appeared while writing, nothing else written"
-                        ));
-                        return;
-                    }
-                    match std::fs::rename(&old, &new) {
-                        Ok(()) => {
-                            self.tracks[idx].path = new.clone();
-                            self.tracks[idx].file = name;
-                            moved.push((old, new));
-                            files += 1;
-                        }
-                        Err(e) => self.error(format!("cannot rename `{}`: {e}", old.display())),
-                    }
-                }
-                Renaming::Folder(old) => {
-                    let new = old.with_file_name(&name);
-                    if new.exists() && new != old {
-                        self.error(format!(
-                            "`{name}` appeared while writing, nothing else written"
-                        ));
-                        return;
-                    }
-                    if let Err(e) = std::fs::rename(&old, &new) {
-                        self.error(format!("cannot rename `{name}`: {e}"));
-                        continue;
-                    }
-                    // One rename moves the folder; the tracks inside it just
-                    // need their paths followed.
-                    for track in &mut self.tracks {
-                        if let Ok(rest) = track.path.strip_prefix(&old) {
-                            let to = new.join(rest);
-                            moved.push((track.path.clone(), to.clone()));
-                            track.path = to;
-                        }
-                    }
-                    files += 1;
-                }
-                Renaming::Playlist(old) => {
-                    let Some(dir) = self.playlists_in() else {
-                        continue;
-                    };
-                    let to = dir.join(format!("{name}.m3u"));
-                    if to.exists() && *old != name {
-                        self.error(format!(
-                            "`{name}` appeared while writing, nothing else written"
-                        ));
-                        return;
-                    }
-                    if let Err(e) = std::fs::rename(dir.join(format!("{old}.m3u")), &to) {
-                        self.error(format!("cannot rename `{old}`: {e}"));
-                        continue;
-                    }
-                    // A tab showing it keeps showing it, under the new name.
-                    if self.playlist_view.as_deref() == Some(old.as_str()) {
-                        self.playlist_view = Some(name.clone());
-                    }
-                    for tab in &mut self.tabs {
-                        if tab.playlist.as_deref() == Some(old.as_str()) {
-                            tab.playlist = Some(name.clone());
-                        }
-                    }
-                    files += 1;
-                }
-            }
-        }
-
-        self.renames.clear();
-        self.end_edit();
-        let fixed = self.repair_playlists(&moved);
-        self.folders = library::folders(&self.tracks, &self.root);
-        self.reload_playlists();
-        self.rebuild_view();
-
-        if fixed > 0 {
-            self.info(format!(
-                "renamed {files}, updated {fixed} playlist{}",
-                plural(fixed)
-            ));
-        } else {
-            self.info(format!("renamed {files}"));
+    /// The path a rename would move away from, which is what makes it a
+    /// vacated name for anything else in the same batch.
+    pub(super) fn rename_source(&self, what: &Renaming) -> Option<PathBuf> {
+        match what {
+            Renaming::Track(idx) => Some(self.tracks.get(*idx)?.path.clone()),
+            Renaming::Folder(path) | Renaming::Playlist(path) => Some(path.clone()),
         }
     }
 
     /// Where a rename would put something, for the checks and the write.
-    /// Drops any pending rename of these paths.
-    ///
-    /// A file that is about to be deleted has no business also being renamed:
-    /// `:w` would have to do both to one path, and the delete is what the user
-    /// meant last.
-    pub(super) fn forget_renames(&mut self, gone: &[PathBuf]) {
-        let doomed: Vec<Renaming> = self
-            .renames
-            .keys()
-            .filter(|what| {
-                self.rename_source_of(what)
-                    .is_some_and(|from| gone.contains(&from))
-            })
-            .cloned()
-            .collect();
-        for what in doomed {
-            self.renames.remove(&what);
-        }
-        // The buffer being typed goes too, or leaving it puts the rename back.
-        if let Some(edit) = &self.edit
-            && self
-                .rename_source_of(&edit.what)
-                .is_some_and(|from| gone.contains(&from))
-        {
-            self.edit = None;
-        }
-    }
-
-    /// The path a rename would move away from, which is what makes it a
-    /// vacated name for anything else in the same batch.
-    pub(super) fn rename_source(&self, what: &Renaming) -> Option<PathBuf> {
-        self.rename_source_of(what)
-    }
-
-    fn rename_source_of(&self, what: &Renaming) -> Option<PathBuf> {
-        match what {
-            Renaming::Track(idx) => Some(self.tracks.get(*idx)?.path.clone()),
-            Renaming::Folder(path) => Some(path.clone()),
-            Renaming::Playlist(old) => Some(self.playlists_in()?.join(format!("{old}.m3u"))),
-        }
-    }
-
     pub(super) fn rename_target(&self, what: &Renaming, name: &str) -> Option<PathBuf> {
         match what {
             Renaming::Track(idx) => {
@@ -404,7 +406,11 @@ impl App {
                 Some(path.with_file_name(file_name))
             }
             Renaming::Folder(path) => Some(path.with_file_name(name)),
-            Renaming::Playlist(_) => Some(self.playlists_in()?.join(format!("{name}.m3u"))),
+            // Same kind of file as before: an `.m3u8` stays one.
+            Renaming::Playlist(from) => {
+                let ext = from.extension().and_then(|e| e.to_str()).unwrap_or("m3u");
+                Some(from.with_file_name(format!("{name}.{ext}")))
+            }
         }
     }
 }

@@ -97,9 +97,16 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     };
     // vim's modified marker: something is typed but not written.
     let dirty = if app.unsaved() { " [+] " } else { "" };
+    // A scan or a `:w` still running: a moving mark and how far along it is.
+    let job = app
+        .job
+        .as_ref()
+        .map(|job| format!(" {} ", job.progress()))
+        .unwrap_or_default();
     // The track name is the only elastic part: everything else has to fit, or
     // a five digit track count gets its last digit shaved off.
     let fixed = left.chars().count()
+        + job.chars().count()
         + where_.len()
         + dirty.len()
         + vol.chars().count()
@@ -112,6 +119,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(left, mode_style),
+            Span::styled(job, Style::default().fg(Color::Cyan)),
             Span::styled(
                 where_,
                 Style::default()
@@ -136,12 +144,10 @@ pub(super) fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
     let line = match app.mode {
         Mode::Command | Mode::Search => {
             let mut spans = vec![Span::raw(app.line_prefix.to_string())];
-            spans.extend(with_cursor(app));
+            spans.extend(with_cursor(app, usize::from(area.width).saturating_sub(1)));
             Line::from(spans)
         }
-        // Green for what worked, yellow for what did not, and never red: red
-        // belongs to a gate in front of something about to be lost, and this
-        // line is only ever about what already happened.
+        // The flag is set on a failure.
         _ => match app.live_msg() {
             Some((text, true)) => {
                 Line::styled(text.to_string(), Style::default().fg(Color::Yellow))
@@ -173,22 +179,28 @@ pub(super) fn draw_cmdline(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// The line being edited, with a block where the cursor is. A hollow looking
-/// block in insert and a solid one otherwise, the way a terminal vi shows it.
-pub(super) fn with_cursor(app: &App) -> Vec<Span<'static>> {
+/// The line being edited, with an underlined cell where the cursor is,
+/// slid sideways when it is longer than `room` cells so the cursor stays on
+/// screen.
+pub(super) fn with_cursor(app: &App, room: usize) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthChar;
+
     let text: Vec<char> = app.line.chars().collect();
     let at = app.line_cur.min(text.len());
-    let before: String = text[..at].iter().collect();
+    // The first character shown: as far left as the cursor still fits.
+    let cells = |chars: &[char]| -> usize { chars.iter().map(|c| c.width().unwrap_or(0)).sum() };
+    let room = room.max(2);
+    let mut start = 0;
+    while start < at && cells(&text[start..=at.min(text.len().saturating_sub(1))]) >= room {
+        start += 1;
+    }
+    let before: String = text[start..at].iter().collect();
     let under = text.get(at).copied().unwrap_or(' ');
     let after: String = text.get(at + 1..).unwrap_or(&[]).iter().collect();
 
-    let cursor = if app.line_insert {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::UNDERLINED)
-    } else {
-        Style::default().add_modifier(Modifier::REVERSED)
-    };
+    let cursor = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::UNDERLINED);
 
     vec![
         Span::raw(before),

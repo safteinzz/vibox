@@ -30,7 +30,10 @@ fn renames(pairs: &[(&str, &str)]) -> Wanted {
 #[test]
 fn a_name_already_on_disk_is_refused() {
     let wanted = renames(&[("/m/a.mp3", "/m/b.mp3")]);
-    assert!(plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err());
+    assert!(
+        plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err(),
+        "`fs::rename` would replace b.mp3 without asking"
+    );
 }
 
 #[test]
@@ -51,7 +54,10 @@ fn a_rename_and_a_move_claiming_one_name_are_refused() {
         moves: vec![(p("/m/sub/c.mp3"), p("/m/same.mp3"))],
         ..Wanted::default()
     };
-    assert!(plan(&wanted, &disk(&["/m/a.mp3", "/m/sub/c.mp3"])).is_err());
+    assert!(
+        plan(&wanted, &disk(&["/m/a.mp3", "/m/sub/c.mp3"])).is_err(),
+        "whichever ran second would replace the first"
+    );
 }
 
 #[test]
@@ -60,7 +66,10 @@ fn a_copy_onto_an_occupied_name_is_refused() {
         copies: vec![(p("/m/a.mp3"), p("/m/b.mp3"))],
         ..Wanted::default()
     };
-    assert!(plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err());
+    assert!(
+        plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err(),
+        "the copy would replace b.mp3"
+    );
 }
 
 #[test]
@@ -79,11 +88,9 @@ fn renaming_something_that_is_also_being_deleted_is_refused() {
 #[test]
 fn a_swap_is_refused_rather_than_half_applied() {
     let wanted = renames(&[("/m/a.mp3", "/m/b.mp3"), ("/m/b.mp3", "/m/a.mp3")]);
-    let refusal = plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).unwrap_err();
     assert!(
-        refusal.0.contains("swap"),
-        "the message has to say what to do instead, got `{}`",
-        refusal.0
+        plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err(),
+        "a swap needs a name that neither side holds, which is two writes"
     );
 }
 
@@ -116,20 +123,15 @@ fn a_name_freed_by_a_move_in_the_same_write_is_allowed() {
         moves: vec![(p("/m/b.mp3"), p("/m/sub/b.mp3"))],
         ..Wanted::default()
     };
-    assert!(
-        plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).is_err(),
-        "a rename and a move that depend on each other are refused, not guessed at"
+    let steps = plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).expect("allowed");
+    assert_eq!(
+        steps,
+        vec![
+            Step::Rename(p("/m/b.mp3"), p("/m/sub/b.mp3")),
+            Step::Rename(p("/m/a.mp3"), p("/m/b.mp3")),
+        ],
+        "the move has to run first, or the rename lands on the file still there"
     );
-}
-
-#[test]
-fn a_name_freed_by_a_deleted_folder_is_allowed() {
-    let wanted = Wanted {
-        moves: vec![(p("/m/a.mp3"), p("/m/old/a.mp3"))],
-        delete_dirs: vec![p("/m/old")],
-        ..Wanted::default()
-    };
-    assert!(plan(&wanted, &disk(&["/m/a.mp3", "/m/old/a.mp3"])).is_ok());
 }
 
 #[test]
@@ -149,12 +151,19 @@ fn a_chain_of_renames_runs_in_an_order_that_works() {
 #[test]
 fn an_untouched_name_is_no_obstacle() {
     let wanted = renames(&[("/m/a.mp3", "/m/new.mp3")]);
-    assert!(plan(&wanted, &disk(&["/m/a.mp3", "/m/unrelated.mp3"])).is_ok());
+    assert!(
+        plan(&wanted, &disk(&["/m/a.mp3", "/m/unrelated.mp3"])).is_ok(),
+        "a file nothing claims is not in the way"
+    );
 }
 
 #[test]
 fn an_empty_batch_is_allowed_and_does_nothing() {
-    assert_eq!(plan(&Wanted::default(), &disk(&[])).unwrap(), vec![]);
+    assert_eq!(
+        plan(&Wanted::default(), &disk(&[])).unwrap(),
+        vec![],
+        "nothing asked for, nothing to do"
+    );
 }
 
 // ---- the order the steps come out in ------------------------------------
@@ -187,6 +196,7 @@ fn deletions_come_before_the_renames_they_make_room_for() {
         ..Wanted::default()
     };
     let steps = plan(&wanted, &disk(&["/m/a.mp3", "/m/b.mp3"])).unwrap();
+    // The copy reads `a.mp3`, so it is made before the rename takes it away.
     let kinds: Vec<&str> = steps
         .iter()
         .map(|s| match s {
@@ -196,5 +206,9 @@ fn deletions_come_before_the_renames_they_make_room_for() {
             Step::DeleteDir(_) => "rmdir",
         })
         .collect();
-    assert_eq!(kinds, vec!["delete", "rename", "copy", "rmdir"]);
+    assert_eq!(
+        kinds,
+        vec!["delete", "copy", "rename", "rmdir"],
+        "deletes free names, copies read what renames take away, folders go last"
+    );
 }

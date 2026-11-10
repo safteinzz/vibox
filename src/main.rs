@@ -1,13 +1,15 @@
 //! vibox: a jukebox you exit with `:q`.
 //!
 //! The library is a directory, the keys are vi's, and the last line of the
-//! screen is the command line.
+//! screen is the command line. This file is argv and `--help`, the terminal
+//! setup, and the event loop; everything else is in the lib.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -34,7 +36,7 @@ const TEMPLATE: &str =
 /// rather than a subcommand.
 const WAYS: &str = "\x1b[1mWays to run it (not subcommands):\x1b[0m
   vibox           play your music directory
-                    type to filter, `:help` lists every key, `:q` quits
+                    `/` searches, `:help` lists every key, `:q` quits
   vibox [path]    the same, but on that library root for this run only";
 
 /// The rest of the block: the one thing a shape line cannot say, then what a
@@ -97,33 +99,58 @@ enum Cmd {
     Selfie(vibox::selfcmd::Cmd),
 }
 
-fn main() -> Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    let result = match cli.cmd {
+        Some(Cmd::Selfie(cmd)) => vibox::selfcmd::run(cmd),
+        None => play(cli).map(|()| ExitCode::SUCCESS),
+    };
+    // Our words and then whatever failed under them, in plain words: the
+    // default report is a debug dump that ends in an errno.
+    result.unwrap_or_else(|e| {
+        eprintln!("vibox: {}", vibox::reason::chain(&e));
+        ExitCode::FAILURE
+    })
+}
 
-    if let Some(Cmd::Selfie(cmd)) = cli.cmd {
-        return vibox::selfcmd::run(cmd);
-    }
-
+fn play(cli: Cli) -> Result<()> {
     let Some(sort) = SortKey::parse(&cli.sort) else {
         bail!(
-            "bad sort key `{}` - use path, title, artist, album or duration",
+            "bad sort key `{}`, use path, title, artist, album or duration",
             cli.sort
         );
     };
 
     // A path on the command line is for this session only; with none, the
-    // library is whatever `:set root=` put in the rc file.
+    // library is whatever `:set root=` put in the rc file. Made absolute here,
+    // because everything written from it, a playlist or `:mkrc`, has to mean
+    // the same thing when it is read from another directory.
     let argv_root = cli.path.is_some();
     let root = match cli.path {
-        Some(p) => p,
-        None => excmd::configured_music()
-            .or_else(dirs::audio_dir)
-            .unwrap_or(std::env::current_dir()?),
+        Some(p) => vibox::library::absolute(&p),
+        None => match excmd::configured_music().or_else(dirs::audio_dir) {
+            Some(root) => root,
+            None => std::env::current_dir().map_err(|e| {
+                anyhow!(
+                    "cannot tell which directory this is ({}), pass the library to `vibox`",
+                    vibox::reason::of(&e)
+                )
+            })?,
+        },
     };
+
+    if !root.exists() {
+        let from = if argv_root {
+            "pass a library that exists"
+        } else {
+            "pass the library to `vibox`, or fix `set root=` in `~/.config/vibox/viboxrc`"
+        };
+        bail!("no such path: `{}`, {from}", root.display());
+    }
 
     // ratatui would panic with a raw os error if there is no terminal to take over.
     if !std::io::stdout().is_terminal() {
-        bail!("vibox is a full screen player and needs a terminal; it has nothing to pipe");
+        bail!("vibox is a full screen player and needs a terminal, it has nothing to pipe");
     }
 
     let boot = Boot::new(&root);
@@ -135,6 +162,10 @@ fn main() -> Result<()> {
     excmd::load_rc(&mut app, argv_root);
     let terminal = ratatui::init();
     let result = run(terminal, &mut app);
+    app.stop_jobs();
+    // The shape the terminal had before vibox set its own, which `restore`
+    // leaves alone.
+    let _ = execute!(std::io::stdout(), SetCursorStyle::DefaultUserShape);
     ratatui::restore();
     excmd::save_state(&app);
     result
@@ -157,8 +188,12 @@ fn run(mut terminal: DefaultTerminal, app: &mut App) -> Result<()> {
             shape = Some(app.mode == app::Mode::EditInsert);
         }
 
-        // The visualiser needs frames; idle browsing does not.
-        let tick = if app.matrix.on { FRAME } else { TICK };
+        // The visualiser and a job's spinner need frames; idle browsing does not.
+        let tick = if app.matrix.on || app.job.is_some() {
+            FRAME
+        } else {
+            TICK
+        };
         if event::poll(tick)?
             && let Event::Key(key) = event::read()?
         {

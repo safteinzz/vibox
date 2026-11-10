@@ -6,28 +6,56 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::App;
 
-/// Keys for whichever window is open: info, changes, history or help.
+/// Keys for whichever window is open: an alert, info, changes, history or help.
 pub(super) fn window_key(app: &mut App, key: KeyEvent) {
     // `gg` is two presses, so the first `g` waits here and anything else drops it.
     let after_g = app.pending.take() == Some('g');
-    if key.code == KeyCode::Char('g') && !after_g && !app.show_info {
+    if key.code == KeyCode::Char('g') && !after_g {
         app.pending = Some('g');
         return;
     }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    // The info window takes the keyboard while it is up.
+    // A failure that has to be read sits over everything else until it is
+    // dismissed, and scrolls when it is longer than the screen.
+    if app.alert_up()
+        && let Some(alert) = app.alert.as_mut()
+    {
+        match key.code {
+            KeyCode::Char('q' | 'Q') | KeyCode::Esc | KeyCode::Enter => app.alert = None,
+            KeyCode::Char('j') | KeyCode::Down => alert.top += 1,
+            KeyCode::Char('k') | KeyCode::Up => alert.top = alert.top.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => alert.top += 10,
+            KeyCode::Char('u') if ctrl => alert.top = alert.top.saturating_sub(10),
+            KeyCode::Char('g') | KeyCode::Home => alert.top = 0,
+            KeyCode::Char('G') | KeyCode::End => alert.top = usize::MAX,
+            _ => {}
+        }
+        return;
+    }
+
+    // The info window takes the keyboard while it is up, and scrolls on a
+    // screen too short for every field.
     if app.show_info {
         match key.code {
             KeyCode::Char('y') => {
                 let path = app.current_track().map(|t| t.path.display().to_string());
                 if let Some(path) = path {
-                    app.copy_to_clipboard(&path);
+                    app.copy_to_clipboard(&path, &path);
                 }
                 app.show_info = false;
+                app.info_top = 0;
             }
             KeyCode::Char('q' | 'Q' | 'K') | KeyCode::Esc | KeyCode::Enter => {
                 app.show_info = false;
+                app.info_top = 0;
             }
+            KeyCode::Char('j') | KeyCode::Down => app.info_top += 1,
+            KeyCode::Char('k') | KeyCode::Up => app.info_top = app.info_top.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => app.info_top += 10,
+            KeyCode::Char('u') if ctrl => app.info_top = app.info_top.saturating_sub(10),
+            KeyCode::Char('g') | KeyCode::Home => app.info_top = 0,
+            KeyCode::Char('G') | KeyCode::End => app.info_top = usize::MAX,
             _ => {}
         }
         return;
@@ -36,7 +64,6 @@ pub(super) fn window_key(app: &mut App, key: KeyEvent) {
     // The changes window pans sideways: a rename of two long paths is wider
     // than any popup, and the interesting part is usually the far end.
     if app.show_changes {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let step = app.count.take().unwrap_or(1) * 4;
         match key.code {
             KeyCode::Char('l') | KeyCode::Right => app.changes_pan += step,
@@ -48,8 +75,13 @@ pub(super) fn window_key(app: &mut App, key: KeyEvent) {
             // The whole list, not the row under a cursor: there is no cursor
             // here, and what you want to paste elsewhere is all of it.
             KeyCode::Char('y') => {
-                let text = app.pending_changes().join("\n");
-                app.copy_to_clipboard(&text);
+                let changes = app.pending_changes();
+                let what = format!(
+                    "{} change{}",
+                    changes.len(),
+                    if changes.len() == 1 { "" } else { "s" }
+                );
+                app.copy_to_clipboard(&changes.join("\n"), &what);
                 app.show_changes = false;
             }
             // A big batch outgrows any popup, so it scrolls like the history
@@ -74,7 +106,6 @@ pub(super) fn window_key(app: &mut App, key: KeyEvent) {
 
     // The history window scrolls, since a long session outgrows any popup.
     if app.show_history {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let step = app.count.take().unwrap_or(1);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => app.history_top += step,
